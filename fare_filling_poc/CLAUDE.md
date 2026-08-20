@@ -23,7 +23,7 @@ JSON output for downstream AI/automation integration.
 ## 2. Pipeline architecture
 
 ```
-Form upload (future, not built yet)
+Web upload form (webapp/, see section 15) OR run_new_filing.py CLI
   -> General Value / anchor rows: (RULE, TARIFF, PRICEBOOK NAME, sheet_type)
   -> Group anchor rows by RULE (one RULE can have multiple TARIFFs)
   -> For each RULE: resolve every category once (CATEGORY_REGISTRY, in
@@ -36,8 +36,8 @@ Form upload (future, not built yet)
 ```
 
 Key insight: **one pricebook file = one RULE**, but a RULE can have
-multiple TARIFFs (entered via the -- not-yet-built -- upload form, along
-with `sheet_type`). Fare Rules / category tabs are defined once per RULE;
+multiple TARIFFs (entered via the upload form or CLI, along with
+`sheet_type`). Fare Rules / category tabs are defined once per RULE;
 the pipeline cross-joins that once-per-RULE data across every TARIFF.
 
 ## 3. Category resolver decision tree
@@ -484,7 +484,7 @@ running the test scripts).
 - **`data_mapping_final.json` (formerly `data_mapping_parsed.json`, removed during cleanup) is intentionally NOT wired into any code.** It's a parsed reference (all CAT01-33, Type 1/2/3 columns) from the user's `Final_Data_Mapping.xlsx`, used by hand when writing new `ai_specs/*.yaml` files or cross-checking a category's real column layout or Type 2/3 mapping. Keep it that way unless explicitly asked to change it.
 - **Template capacity is dynamic, not fixed.** Every category block ships with only 3 example rows before the next category's header -- `_ensure_capacity()` shifts everything below down as needed, and `cumulative_offset` is threaded through `write_to_template()` so every subsequent category/table's position stays correct.
 - **CAT04's Carrier Table No.1 linking**: the main row's own sequential position (its `No`) is copied into the supporting table's `CAT4 ID` column -- not a separate "Table 1" field (which turned out to be an unrelated CONSTANT pointer label, not a join key).
-- **Sheet type (1/2/3) comes from the (not-yet-built) upload form**, entered manually alongside RULE/TARIFF/file -- not detected from the file itself. `GAP`-sourced fields only apply their mapping when `sheet_type == 1`.
+- **Sheet type (1/2/3) comes from the upload form** (or CLI flag), entered manually alongside RULE/TARIFF/file -- not detected from the file itself, and not cross-checked against it either (see section 15's known limitations). `GAP`-sourced fields only apply their mapping when `sheet_type == 1`.
 
 ## 9. Open items
 
@@ -781,10 +781,13 @@ category correctly stays `None` only when its own Fare Rules row wasn't
 found in that specific file at all (an unrelated, pre-existing branch,
 not an OW/RT bug).
 
-## 14. How to run
+## 14. How to run (CLI)
 
-The stand-in for the not-yet-built upload form -- until that exists, this
-is where a new batch of real pricebook files gets run.
+The real upload form now exists (`webapp/`, see section 15) and is the
+primary way to run a new batch of files. This CLI entry point still has
+its place -- explicit `--file`/`--rule-tariff` pairing is convenient for
+scripted or one-off runs against files whose RULE you already know,
+without going through a browser.
 
 ```bash
 cd fare_filling_poc
@@ -816,3 +819,175 @@ The older regression scripts (`test_from_real_files.py`, `test_type2.py`,
 `test_type3.py`) are currently broken -- see section 5/9, their fixture
 files no longer exist. `run_new_filing.py` against real files in
 `input_files/` is the verified way to exercise the pipeline right now.
+
+## 15. Web upload form (`webapp/`)
+
+Lives at the project root, sibling to `fare_filling_poc/`, not inside it
+(`webapp/` imports from `fare_filling_poc/` via `sys.path.insert`, same
+pattern `run_new_filing.py` already used). Wraps the exact same pipeline
+functions the CLI calls -- `run_pipeline()`, `run_pipeline_type2_3()`,
+`write_to_template()`, `write_to_template_type2()` -- behind a small
+FastAPI service. No pipeline logic is duplicated for the web layer.
+
+**Verified end-to-end, through the real HTTP form (not just curl or the
+CLI), for all three sheet types against real production files** -- HKF1/
+HKF2 (Type 1), Cargolux CDM (Type 2, RULE `3J8F` correctly auto-detected
+from content), Tianqi Edifact (Type 3, RULE `3RY4`).
+
+### Files
+
+```
+webapp/
+|-- server.py          # FastAPI routes: GET / (the form), POST /api/jobs,
+|                       # GET /api/jobs/{id} (status), GET /api/jobs/{id}/download,
+|                       # GET /api/health. Validates wo_id (path-safe regex),
+|                       # sheet_type, and file extensions BEFORE a job is created.
+|-- jobs.py              # Single background worker thread + FIFO queue. Wraps
+|                       # intake_matcher.match_files_to_rules() -> load_pricebook_*()
+|                       # -> run_pipeline*() -> write_to_template*(), reporting
+|                       # progress into an in-memory job dict instead of stdout.
+|-- static/
+|   |-- index.html       # The form -- built to match a real reference screenshot
+|   |-- style.css         # (pale-cyan/navy palette, "ati Business Group" branding)
+|   `-- app.js            # Client-side validation, drag/drop, status polling,
+|                       # auto-download on completion
+|-- uploads/              # Per-job: uploaded files + run_log.txt (gitignored)
+`-- outputs/               # Completed .xlsx per job (gitignored)
+```
+
+### Why single-worker, not concurrent
+
+`run_logger.py` is module-level global state (`set_log_file`/`log`/
+`record_ai_call` all write shared module variables) -- two concurrent
+pipeline runs in different threads would interleave and corrupt each
+other's progress log. A FIFO queue (one `threading.Thread` worker,
+`queue.Queue` of job IDs) is the simplest correct fix. At expected usage
+volume (tens of WOs/month, per the ROI numbers worked out earlier this
+project), jobs briefly queueing behind each other is not a real
+bottleneck -- revisit only if usage grows enough to make it one.
+
+### Job status lifecycle
+
+`queued -> matching -> resolving -> writing -> done` (or `error` from any
+stage). `matching` = `intake_matcher.match_files_to_rules()`; `resolving`
+= category resolution; `writing` = `template_writer`. The browser polls
+`GET /api/jobs/{id}` every 2s and auto-triggers the download once
+`status == "done"` (`window.location.href` to a `Content-Disposition:
+attachment` response -- this does NOT navigate the page away, confirmed).
+
+### Validation & guardrails (all confirmed by deliberately triggering them, not just written)
+
+- **Path-traversal guard**: `wo_id` is validated server-side against
+  `^[A-Za-z0-9_-]{1,64}$` before use. It's embedded directly into the
+  output filename (`SQ Fare Filing_<wo_id>_Type<N>_<job_id>.xlsx`) --
+  without this check, a `wo_id` of `../../evil` could have influenced
+  where the completed filing gets written. Confirmed blocked with a real
+  request.
+- **File-extension guard, both layers**: client-side (`app.js`, inline
+  warning, file dropped before upload) AND server-side (`server.py`,
+  hard 400) both reject non-`.xlsm`/`.xlsx` uploads. The client check
+  alone is trivially bypassable (curl, or a modified request) -- the
+  server check is the one that actually matters. Confirmed both reject a
+  `.txt` file.
+- **RULE matching is content-based** -- see `intake_matcher.py`'s own
+  docstring for why filename matching (fails on Cargolux: RULE `3J8F`
+  isn't a substring of filename `A7J8F`) and upload-order matching
+  (silent, unrecoverable mismatch risk) were both ruled out. Any
+  mismatch, duplicate, or unmatched RULE/spec is a hard, specific error
+  -- never a guess.
+- **Mismatched Filing Classification Type fails safely, not silently.**
+  Deliberately tested: submitting a real Type 2 file with "Type 1"
+  selected does NOT produce a corrupted/garbage filing -- Type 1's
+  loader expects a sheet literally named `"Fare Rules"` that the Type 2
+  file doesn't have under that name, so it raises `KeyError` before any
+  output is written. The raw exception is logged in full server-side
+  (`run_logger.log()` + `traceback.print_exc()`) for real debugging, but
+  the user sees a plain, actionable message instead: *"This filing could
+  not be processed. The most common cause is the uploaded file not
+  matching the selected Filing Classification Type..."* (`jobs.py`'s
+  outer `except Exception` handler). **Known gap, not yet fixed**: there
+  is no proactive check *before* Submit that catches this -- it only
+  surfaces after processing starts.
+
+### A real regression, found by actually driving the form (not by reasoning about the code)
+
+The hidden file `<input type="file" ... hidden>` kept its HTML
+`required` attribute. Browsers cannot show the native "please fill this
+out" validation bubble on a hidden field, so an incomplete form's submit
+was silently cancelled entirely -- console showed `An invalid form
+control with name='files' is not focusable`, zero requests ever left the
+browser, nothing visible happened. A first attempted fix (removing the
+Submit button's own `disabled` gating) was necessary but not sufficient
+-- it never got a chance to run, since the browser blocked the submit
+one step earlier. Real fix: removed `required` from the file input, and
+added `novalidate` to the `<form>` so ALL validation now runs through
+`app.js`'s `validateForm()`, which always shows exactly what's missing.
+Confirmed via a real headless-browser session (Playwright), not just
+inspection. Now covered by `ci/browser_smoke_test.py` (section 16) so
+this exact class of bug can't silently return.
+
+### Known limitations (accepted for this version, not oversights)
+
+- **In-memory job state.** A service restart loses in-flight/completed
+  job status -- the output `.xlsx` itself survives on disk in
+  `webapp/outputs/`, just unreachable via its job-ID download link
+  afterward.
+- **No upload/output retention policy yet.** `webapp/uploads/` and
+  `webapp/outputs/` grow with every submission, forever. Needs a cleanup
+  job before running unattended for real -- see
+  `docs/deployment-runbook.md` section 7.
+- **No authentication.** Deliberate choice for this internal-only
+  version (per explicit decision when the form was scoped). Revisit if
+  usage moves beyond a small trusted group.
+- **No file-size limit** on uploads.
+
+### Running it locally
+
+```bash
+cd fare_filling_poc_v36
+fare_filling_poc\.venv\Scripts\python.exe -m uvicorn webapp.server:app --host 0.0.0.0 --port 8000
+```
+(run from the project root, so `webapp` is importable as a package). Then
+open `http://localhost:8000/`. For real deployment, see
+`docs/deployment-runbook.md`.
+
+## 16. Version control & CI
+
+The project previously had no git repository at all. Now initialized
+(`main` branch), with `.gitignore` deliberately excluding: rebuildable
+virtual environments, `ai_config.env` (local secrets, never committed --
+see section 4), generated run output (`pipeline_output_new_filing.json`,
+`run_log_*.txt`, `SQ Fare Filing_*.xlsx`), `webapp/uploads/` +
+`webapp/outputs/` (real fare-filing data passes through here), **and,
+deliberately, the real production pricebook samples in `input_files/`
+and generated business documents in `reports/`** -- both are treated as
+data/deliverables rather than source, and the pricebook data specifically
+is real business data that shouldn't be committed without a separate,
+explicit decision to do so.
+
+### CI (`.gitlab-ci.yml`)
+
+Scoped deliberately narrow: catches import/syntax breakage and the exact
+regression classes already found once by hand, rather than attempting
+full pipeline coverage a shared CI runner can't realistically provide (no
+route to the self-hosted AI endpoint from a CI runner; real pricebook
+fixtures are intentionally not committed, see above).
+
+| Job | Catches |
+|---|---|
+| `import-sanity` | A broken import or syntax error in any pipeline module or category resolver -- runs `importlib.import_module()` on every core module and `ast.parse()` on every `categories/*.py` file |
+| `webapp-static-consistency` | An `index.html`/`app.js` element-id mismatch -- automates the exact check that was run by hand after every `webapp/static/` edit during development |
+| `webapp-smoke-test` (`ci/browser_smoke_test.py`) | A real headless-browser click-through against a live `uvicorn` instance the job starts itself. Regression-guards the hidden-required-field bug above (empty submit must show validation AND make no backend call), and confirms a filled submission reaches the backend end-to-end using a synthetic blank `.xlsx` (no real pricebook data or reachable AI endpoint needed -- expects and confirms a clean RULE-detection error, which proves the request/response/polling plumbing works without depending on AI) |
+| `pipeline-regression-real-files` | Manual, `allow_failure: true` placeholder -- NOT wired up automatically. Its fixture files (`input_files_type2/`, `input_files_type3/`, the original `V1-ABC1 Type1.xlsm`) no longer exist on disk (section 5/9). Left visibly unfinished in the pipeline rather than silently absent. |
+
+### Deployment
+
+CD is deliberately not "auto-deploy on merge" -- the target host is
+managed by Ops/Infra (no direct access from this project), and there's
+no authentication layer yet to make an unattended production push a safe
+default. The full handoff procedure is `docs/deployment-runbook.md`:
+environment setup, a ready-to-use `systemd` unit, an `nginx` reverse-
+proxy config, the storage-retention gap (needs a decision, not yet
+fixed), and exactly what a service restart loses (see section 15's
+in-memory-state limitation) -- written for someone who has never seen
+this codebase to execute end to end.
