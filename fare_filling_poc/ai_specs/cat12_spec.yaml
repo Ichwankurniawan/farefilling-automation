@@ -1,0 +1,10 @@
+category: CAT12
+instruction: >
+  This is an airline fare's Surcharge condition free text -- it did not
+  match "REFER TO..." nor exact "NONE UNLESS OTHERWISE SPECIFIED".
+  Extract the surcharge type/amount/currency information the text
+  explicitly states, if any. This spec is a placeholder -- CAT12's field
+  mapping is still incomplete (Charge Information and Applies To blocks
+  have no confirmed source yet), so treat any extraction here as low
+  confidence regardless.
+few_shot_examples: []

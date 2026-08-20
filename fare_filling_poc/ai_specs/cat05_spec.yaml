@@ -1,0 +1,8 @@
+category: CAT05
+instruction: >
+  This is an airline fare's Advance Reservations/Ticketing condition free
+  text -- it did not match "REFER TO..." nor exact "NONE UNLESS OTHERWISE
+  SPECIFIED". Extract any advance-purchase duration/unit, confirmed
+  sectors, or ticketing deadline requirements the text explicitly states.
+  Leave any field the text doesn't address as null.
+few_shot_examples: []

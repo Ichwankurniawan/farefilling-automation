@@ -1,0 +1,7 @@
+category: CAT17
+instruction: >
+  This is an airline fare's HIP/Mileage Exceptions condition free text --
+  it did not match a "no restriction" phrase. Extract any HIP (Higher
+  Intermediate Point) or mileage-related restriction the text explicitly
+  states; leave fields null if not addressed.
+few_shot_examples: []

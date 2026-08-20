@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments -- rebuild fresh per machine, never commit
+fare_filling_poc/.venv/
+venv/
+
+# Local secrets/config -- gitignored-style by design, see CLAUDE.md
+# section 4. Recreated manually on each host (see deployment runbook).
+fare_filling_poc/ai_config.env
+
+# Generated pipeline output -- regenerate on demand via run_new_filing.py,
+# not source. (JSON dump, per-run text logs, and the filled Excel filings
+# that land directly in fare_filling_poc/ when run from the CLI.)
+fare_filling_poc/pipeline_output_new_filing.json
+fare_filling_poc/run_log_*.txt
+fare_filling_poc/SQ Fare Filing_*.xlsx
+
+# Webapp runtime data -- uploaded pricebooks, generated filings, and
+# per-job logs. Real fare-filing data passes through here; never commit.
+webapp/uploads/
+webapp/outputs/
+
+# Real production pricebook samples (HKF1/HKF2, Cargolux, Tianqi, ...) --
+# excluded by default because this is real business data, not synthetic
+# test fixtures. If these are ever needed as tracked CI fixtures, that
+# should be a deliberate decision (and ideally synthetic/anonymized data
+# instead), not an accidental commit -- see CLAUDE.md section 5.
+input_files/
+input_files_fullcoverage/
+input_files_variant/
+
+# Generated business documents (Proposed Solution, ROI ledger, ...) --
+# regenerate via the build scripts that produced them, not tracked as
+# source. Revisit if these should actually be version-controlled.
+reports/*.docx
+reports/*.pptx
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db

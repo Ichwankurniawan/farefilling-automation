@@ -1,0 +1,7 @@
+category: CAT06
+instruction: >
+  This is an airline fare's Minimum Stay condition free text -- it did
+  not match "REFER TO..." nor exact "NONE UNLESS OTHERWISE SPECIFIED".
+  Extract the minimum stay duration/unit the text explicitly states.
+  Leave any field the text doesn't address as null.
+few_shot_examples: []

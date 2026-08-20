@@ -1,0 +1,21 @@
+category: CAT04
+source: >
+  Grounded directly in Data Mapping_1 sheet, CATEGORY 4 - Flight
+  Application, field "Not Apl" (sourcing=GAP) for the general fallback
+  case. IMPORTANT ADDITIONAL FINDING: the sheet also documents a
+  separate GAP field "Flight application conditions (Travel, Travel Via,
+  Type, LOC 1/2)" sourced from "Fare Rules » FARE RULE CONDITIONS »
+  CAT04-FlightApplication tab » Column 'FLIGHT APPLICATION'" -- the SAME
+  text column our deterministic Travel field already reads. This means
+  the Geographic Application block (Travel Via, Type, LOC1/2 x3) is
+  documented as extractable from that text too, just without a detailed
+  parsing rule given -- unlike the fully-unmapped fields (Carrier1/2/3,
+  Relation, Flight2/3), which have no documented source at all.
+instruction: >
+  This is an airline fare's Flight Application condition free text --
+  either (a) it didn't match "REFER TO..." nor exact "NONE UNLESS
+  OTHERWISE SPECIFIED" at the top level, or (b) it's the Geographic
+  Application sub-block within an otherwise-REFER TO-resolved entry.
+  Extract flight/carrier/routing restrictions the text explicitly states;
+  leave any field the text doesn't address as null.
+few_shot_examples: []

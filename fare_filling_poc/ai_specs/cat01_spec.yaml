@@ -1,0 +1,13 @@
+category: CAT01
+source: >
+  Grounded directly in Data Mapping_1 sheet, CATEGORY 1 - Eligibility,
+  field "Not Apl" (sourcing=GAP): "Fare Rules tab » Column 'Same as Base
+  Rule OR Amend Base Rule as indicated', or Column 'FARE RULE CONDITIONS'"
+instruction: >
+  This is an airline fare's Eligibility condition free text -- it did not
+  match the "REFER TO..." pointer pattern nor the exact
+  "NONE UNLESS OTHERWISE SPECIFIED" phrase, so a human loader would
+  normally read this text directly to manually determine passenger-type,
+  age, account code, ID, or direction restrictions. Extract only what the
+  text explicitly states; leave any field the text doesn't address as null.
+few_shot_examples: []

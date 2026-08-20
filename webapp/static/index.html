@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>SQ Fare Filing - Fare Sheet Upload Page</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img class="brand-logo-img" src="/static/logo-ati.png" alt="ATI Business Group" />
+      <span class="brand-title">SQ Fare Filing - Fare Sheet Upload Page</span>
+    </div>
+    <div class="user">
+      <div class="avatar">A</div>
+      <span class="user-name">Admin</span>
+      <button class="btn-ghost" type="button">Profile</button>
+      <button class="btn-ghost" type="button">Sign Out</button>
+    </div>
+  </header>
+
+  <main class="content">
+    <h1>Price Book/Fare Sheet Upload Form</h1>
+    <p class="subtitle">
+      Upload price book/fare sheet (Excel) per FID. Files are processed one at a time and the
+      output file (ready to copy-paste to ATPCO) downloaded automatically.
+    </p>
+    <hr class="divider" />
+
+    <form id="filing-form" novalidate>
+      <div class="field-row">
+        <div class="field">
+          <label for="wo_id">Work Order ID (FID)</label>
+          <input id="wo_id" name="wo_id" type="text" placeholder="Enter your text" required />
+        </div>
+
+        <div class="field">
+          <label>Filing Classification Type</label>
+          <span class="field-floating-label">Filing Classification Type</span>
+          <select id="sheet_type" name="sheet_type" required>
+            <option value="" disabled selected>Choose from dropdown</option>
+            <option value="1">Type 1</option>
+            <option value="2">Type 2</option>
+            <option value="3">Type 3</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="rule_tariff_text">Rule &amp; Tariff</label>
+          <input id="rule_tariff_text" name="rule_tariff_text" type="text"
+                 placeholder="e.g. HKF1 (FBRA23P), HKF2 (FBRA3P, FBRINPV)" required />
+          <span id="rule-tariff-hint" class="field-hint hidden"></span>
+        </div>
+      </div>
+
+      <div class="upload-card">
+        <div class="dropzone" id="dropzone">
+          <div class="dropzone-icon">XLS</div>
+          <div class="dropzone-text">
+            <div class="dropzone-title">Select files or drag them here</div>
+            <div class="dropzone-sub">Multiple files are supported. .xlsm or .xlsx only.</div>
+          </div>
+          <input type="file" id="files" name="files" multiple accept=".xlsm,.xlsx" hidden />
+        </div>
+
+        <p id="selected-summary" class="selected-summary hidden"></p>
+        <p id="file-warning" class="field-hint warning hidden"></p>
+        <div id="file-chip-list" class="file-chip-list"></div>
+
+        <button type="submit" id="submit-btn" class="btn-primary">Submit Excel File</button>
+      </div>
+
+      <div id="status-panel" class="status-panel hidden">
+        <p id="status-label" class="status-label">Queued</p>
+        <ul id="log-lines" class="log-lines"></ul>
+        <a id="manual-download" class="manual-download hidden" href="#">Download didn't start? Click here.</a>
+      </div>
+
+      <div id="error-panel" class="error-panel hidden">
+        <p id="error-text"></p>
+      </div>
+    </form>
+
+    <p class="footer">Powered by ATI Business Group</p>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

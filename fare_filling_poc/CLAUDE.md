@@ -1,0 +1,818 @@
+# Fare Filling Automation — Project Context
+
+This file is meant to be read by Claude Code (or any future session/developer)
+picking up this project cold. It captures the architecture decisions,
+per-category mapping status, bugs already found & fixed, and open items —
+everything that would otherwise only live in chat history.
+
+**Read this before touching `template_writer.py` or adding a new category
+resolver.** Several non-obvious bugs (documented below) have already been
+found and fixed once; the reasoning is preserved here so they don't get
+reintroduced.
+
+---
+
+## 1. What this project does
+
+Reads airline fare-filing pricebook files (`.xlsm`), interprets each fare
+category's rule text (deterministic where possible, AI where the text is
+genuinely free-form), and writes the result into the airline's real Excel
+filing template (`SQ_Fare_Filling_Template.xlsx`). Also emits a parallel
+JSON output for downstream AI/automation integration.
+
+## 2. Pipeline architecture
+
+```
+Form upload (future, not built yet)
+  -> General Value / anchor rows: (RULE, TARIFF, PRICEBOOK NAME, sheet_type)
+  -> Group anchor rows by RULE (one RULE can have multiple TARIFFs)
+  -> For each RULE: resolve every category once (CATEGORY_REGISTRY, in
+     numeric order), then cross-join the result across every TARIFF
+     belonging to that RULE
+  -> Output organized PER CATEGORY (dict of "CAT01" -> [rows], matching
+     the real template's per-category blocks, NOT one merged row)
+  -> template_writer.py writes each category's rows into the real
+     template at verified cell coordinates
+```
+
+Key insight: **one pricebook file = one RULE**, but a RULE can have
+multiple TARIFFs (entered via the -- not-yet-built -- upload form, along
+with `sheet_type`). Fare Rules / category tabs are defined once per RULE;
+the pipeline cross-joins that once-per-RULE data across every TARIFF.
+
+## 3. Category resolver decision tree
+
+Every resolver follows this order before falling back to AI:
+
+```
+1. Does this category have ANY field-level DataMapping?
+   NO  -> has_mapping=False -> common fields only, no extraction
+          (verified per-category against the REAL template structure,
+          not inferred from documentation -- e.g. CAT09 genuinely has
+          no RI/Table/CAT columns at all)
+   YES -> continue
+
+2. Does the category have a structured "Need to refer to another tab?"
+   flag column (CAT01/02), or a "REFER TO ..." text pattern (CAT03-07, 10)?
+   YES -> deterministic lookup / regex parse
+   NO  -> continue
+
+3. Is the condition text exactly "NONE UNLESS OTHERWISE SPECIFIED"?
+   YES -> blank entry, confidence=HIGH
+   NO  -> continue
+
+4. Is there an EXPLICIT IF/THEN extraction rule given for this text
+   pattern (e.g. CAT04's "Except:"/"OPERATED BY" parsing, CAT10's
+   "ANY TARIFF"/"ANY RULE" regex)?
+   YES -> deterministic regex, confidence=HIGH
+   NO  -> AI fallback (ai_specs/catXX_spec.yaml), confidence=LOW,
+          flag_reason set
+```
+
+**Important correction already made once:** AI must NOT be triggered for
+the "NONE UNLESS OTHERWISE SPECIFIED" branch -- only for genuinely
+unmatched free text. An earlier version of this code mistakenly routed
+step 3 through AI; this was reverted.
+
+**Second correction already made once:** even for categories where
+`has_mapping=False` (or all mapped fields are deterministic), if there's
+ANY leftover free text with no rule (e.g. CAT09's whole condition, CAT10's
+"Side Trips"/"Notes" sub-rows), don't leave it as a silent TODO -- route it
+through AI too, even if the result only lives in the JSON output (no
+Excel column exists for it, e.g. CAT09's `Note` field).
+
+## 4. AI extraction architecture
+
+Two things feed into every AI call, from two different real sources:
+
+| Source | Sheet | Feeds into | Called at runtime? |
+|---|---|---|---|
+| `template_schema.py` | `(FINAL TEMPLATE) CAT 1-CAT 33` | Field labels shown to the AI (e.g. "Passenger Type", not `PassengerType`) -- read directly from the template's own header cells | **Yes**, every AI call |
+| `data_mapping_final.json` | `Data Mapping` (user's `Final_Data_Mapping.xlsx`) | Manually referenced when writing `ai_specs/*.yaml` instructions or checking a new category's Type 1/2/3 mapping before asking the user again | **No** -- deliberately not wired into code, kept as a reference file only. Supersedes the older `data_mapping_parsed.json` (removed during cleanup -- see section 8) |
+
+```
+ai_specs/catXX_spec.yaml (category instruction + few-shot)
+        |
+base.py -- _ai_extract_entry() (loads spec + field labels for this category)
+        |
+ai_engine.py -- extract_with_ai() (builds prompt, calls the LLM, parses JSON)
+        |
+  AI_PROVIDER=anthropic + ANTHROPIC_API_KEY set?      -> real Claude API call
+  AI_PROVIDER=openai_compatible + AI_BASE_URL/AI_MODEL set? -> real call to a
+                                                          self-hosted/OpenAI-
+                                                          compatible endpoint
+  neither configured?                                  -> mock response,
+                                                          clearly labeled,
+                                                          NOT a real result
+        |
+Entry returned with confidence="LOW", flag_reason set
+        |
+run_logger.record_ai_call() -- logs provider/model/elapsed time/token usage
+for every attempt (real, mock, or failed) -- see section 14
+```
+
+**Two AI providers are supported, chosen by `AI_PROVIDER` env var** (real
+production use is via the second one -- no `ANTHROPIC_API_KEY` is
+available in this environment; the model runs on a self-hosted Linux
+server instead):
+- `AI_PROVIDER=anthropic` -- needs `ANTHROPIC_API_KEY`. Never actually
+  exercised end-to-end with a real key in this project so far.
+- `AI_PROVIDER=openai_compatible` -- needs `AI_BASE_URL` + `AI_MODEL`,
+  `AI_API_KEY` optional (the self-hosted endpoint needs none). **This is
+  the path actually used and verified** -- confirmed end-to-end against a
+  self-hosted `qwen3.6:35b-a3b-uncensored` model at
+  `http://10.90.10.20:8081/v1`, real runs, real tokens, real timing.
+
+Config is loaded from `ai_config.env` (KEY=VALUE lines, gitignored-style
+local file, not committed), auto-loaded once via `ai_engine.py`'s
+`_load_ai_config()` using `os.environ.setdefault()` -- so a real env var
+always wins over the file, and nothing needs to be manually exported
+before running. Current values:
+```
+AI_PROVIDER=openai_compatible
+AI_BASE_URL=http://10.90.10.20:8081/v1
+AI_MODEL=qwen3.6:35b-a3b-uncensored
+AI_MAX_TOKENS=4000
+```
+
+**Reasoning models need a much higher `max_tokens` than a normal chat
+model.** The self-hosted Qwen model emits a separate internal `reasoning`
+field that consumes completion tokens BEFORE the final JSON answer.
+`DEFAULT_MAX_TOKENS` was originally hardcoded `500` (fine for a
+non-reasoning model), which silently truncated every real call
+(`finish_reason: "length"`, empty final content) once switched to this
+model. Fixed: `DEFAULT_MAX_TOKENS` now reads from `AI_MAX_TOKENS`
+(default `4000` if unset). **Ordering matters here**: `_load_ai_config()`
+must run BEFORE `DEFAULT_MAX_TOKENS` is computed at module import time --
+an early version of this fix had the config-file load happen after the
+constant was already read from `os.environ`, so `AI_MAX_TOKENS` set only
+in `ai_config.env` (not a real env var) silently had no effect.
+
+### `categories/base.py` (full file)
+
+```python
+"""
+Base class every category resolver inherits from.
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from ai_engine import extract_with_ai
+from template_schema import get_field_labels
+
+AI_SPECS_DIR = os.path.join(os.path.dirname(__file__), "..", "ai_specs")
+TEMPLATE_PATH = "/home/claude/SQ_Fare_Filling_Template__1_.xlsx"
+
+
+class CategoryResolver:
+    category = None          # e.g. "CAT01"
+    has_mapping = True
+    output_fields = []
+    ai_spec_file = None
+
+    def resolve(self, rule_id, pricebook_data, sheet_type):
+        if not self.has_mapping:
+            # has_mapping=False still returns ONE blank entry, not zero --
+            # the template expects a row (even if just common fields) per
+            # fare. entries=[] used to be a bug that silently produced
+            # zero output rows for e.g. CAT09.
+            return self._bundle(rule_id, sheet_type, "NO_CATEGORY_MAPPING", [self._blank_entry()])
+        return self._resolve_impl(rule_id, pricebook_data, sheet_type)
+
+    def _resolve_impl(self, rule_id, pricebook_data, sheet_type):
+        raise NotImplementedError(f"{self.category} resolver must implement _resolve_impl")
+
+    def _bundle(self, rule_id, sheet_type, source_branch, entries):
+        return {
+            "rule_id": rule_id, "category": self.category,
+            "sheet_type": sheet_type, "source_branch": source_branch,
+            "entries": entries,
+        }
+
+    def _blank_entry(self):
+        entry = {f: None for f in self.output_fields}
+        entry["confidence"] = "HIGH"
+        entry["flag_reason"] = None
+        return entry
+
+    def _flagged_entry(self, reason):
+        entry = {f: None for f in self.output_fields}
+        entry["confidence"] = "LOW"
+        entry["flag_reason"] = reason
+        return entry
+
+    def _ai_extract_entry(self, condition_text, rule_id):
+        spec_path = os.path.join(AI_SPECS_DIR, self.ai_spec_file)
+        fare_context = {"rule_id": rule_id, "category": self.category}
+
+        field_labels = {}
+        if os.path.exists(TEMPLATE_PATH):
+            from template_writer import COLS_BY_CATEGORY
+            cols_map = COLS_BY_CATEGORY.get(self.category, {})
+            field_labels = get_field_labels(TEMPLATE_PATH, self.category, cols_map)
+
+        return extract_with_ai(condition_text, fare_context, spec_path, self.output_fields, field_labels)
+```
+
+**Since this snippet was written**: `TEMPLATE_PATH` is no longer the
+hardcoded `/home/claude/...` sandbox path shown above -- it's now a
+relative path (`template/SQ Fare Filling Template.xlsx`, resolved from
+the project root) so the project runs on any machine, not just the
+original sandbox. `base.py` also now imports `_lookup_owrt_type23` from
+`common_fields.py` and injects it into `_resolve_type2_3()`'s
+`common_override` -- see section 13.
+
+### `ai_engine.py` (key parts)
+
+```python
+"""
+Generic AI-extraction engine, shared by every category resolver.
+One engine builds the prompt, calls the LLM, and parses the JSON
+response. Category-specific knowledge lives in ai_specs/*.yaml, not here.
+"""
+import json
+import os
+import yaml
+
+MODEL = "claude-sonnet-4-5"
+
+
+def extract_with_ai(condition_text, fare_context, spec_path, output_fields, field_labels=None):
+    spec = _load_spec(spec_path)
+    prompt = _build_prompt(condition_text, fare_context, spec, output_fields, field_labels or {})
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        return _mock_response(output_fields, reason="No ANTHROPIC_API_KEY set -- mock response, not a real AI call")
+
+    try:
+        raw = _call_claude(prompt, api_key)
+        parsed = _parse_json_response(raw, output_fields)
+        parsed["confidence"] = "LOW"
+        parsed["flag_reason"] = "AI-extracted from free text -- needs human review"
+        return parsed
+    except Exception as e:
+        return _mock_response(output_fields, reason=f"AI call failed ({e}) -- fell back to blank, flagged")
+
+
+def _build_prompt(condition_text, fare_context, spec, output_fields, field_labels):
+    # Shows the AI the exact template column label per field (from
+    # template_schema.py), not our internal short key names.
+    field_lines = []
+    for f in output_fields:
+        label = field_labels.get(f)
+        if label:
+            field_lines.append(f'  "{f}": null   // template column label: "{label}"')
+        else:
+            field_lines.append(f'  "{f}": null')
+    schema_block = "{\n" + ",\n".join(field_lines) + "\n}"
+
+    return f"""You are extracting structured fare-filing data from an airline fare rule's condition text.
+
+Category: {spec['category']}
+Instruction: {spec['instruction']}
+
+Fare context: {json.dumps(fare_context, indent=2)}
+
+Condition text to interpret:
+\"\"\"{condition_text}\"\"\"
+
+Output ONLY a JSON object with exactly these fields:
+{schema_block}
+"""
+
+# _call_claude(), _parse_json_response(), _mock_response() -- see ai_engine.py directly
+```
+
+**Since this snippet was written**: `_call_claude()` and
+`_call_openai_compatible()` (new -- the `openai_compatible` provider
+path) both return `(text, usage_dict)` tuples instead of just text,
+capturing `prompt_tokens`/`completion_tokens`/`total_tokens` (normalized
+across Anthropic's `input_tokens`/`output_tokens` and OpenAI's native
+field names). `extract_with_ai()` calls `run_logger.record_ai_call(...)`
+for every real/mock/error attempt -- see section 14 for what that logs.
+
+### Every AI-derived result is `confidence="LOW"` -- never HIGH
+
+This is a hard rule across the whole project, whether the result came
+from a real API call or the no-key mock. If a category needs mixed
+confidence (some fields deterministic HIGH, some AI-derived LOW), the
+convention is: **downgrade the whole entry to LOW** rather than trying to
+track confidence per-field (see CAT10's Side Trips/Notes handling).
+
+---
+
+## 5. File structure
+
+```
+fare_filling_poc/
+|-- pricebook_data.py         # Type 1: wraps Fare Rules + tab data; get_fare_rules_row(),
+|                              # get_fare_rules_rows() (multi-condition-line cats),
+|                              # get_fare_rules_subrows() (CAT10-style sub-row cats)
+|-- pricebook_data_type2.py   # Type 2/3: PricebookDataType2 (one row or list of
+|                              # sub-rows per category); shared by both Type 2 and
+|                              # Type 3 via xlsm_loader's synthesis (see section 11)
+|-- xlsm_loader.py             # reads real XLSM files -- KEYWORD-BASED header
+|                              # detection (find_header_row) for all 3 types, NOT
+|                              # "row 1 is header". load_pricebook_from_xlsm() (Type 1),
+|                              # load_pricebook_type2(), load_pricebook_type3()
+|-- common_fields.py           # Type 1 shared fields (PRICEBOOK NAME, RULE, TARIFF,
+|                              # AltGenTariff, AltGenRule) -- IPRG code is PER-CATEGORY,
+|                              # must pass `category` param (see bug #3). Type 2/3 use
+|                              # bundle["common_override"] instead (see section 10).
+|                              # Also: _lookup_owrt() (Type 1 OW/RT, from the "Output"
+|                              # tab) and _lookup_owrt_type23() (Type 2/3 OW/RT, from
+|                              # the Edifact/NDC/Faresheet data sheet) -- see section 13
+|-- run_logger.py              # separate from JSON/xlsx output on purpose -- progress
+|                              # logging + per-AI-call timing/token-usage tracking +
+|                              # end-of-run summary. set_log_file(), log(),
+|                              # record_ai_call(), log_summary()
+|-- run_new_filing.py          # CLI entry point for running the pipeline against NEW
+|                              # real pricebook files (not the synthetic test fixtures)
+|                              # -- see section 14, "How to run"
+|-- ai_config.env              # AI_PROVIDER/AI_BASE_URL/AI_MODEL/AI_MAX_TOKENS --
+|                              # local config, auto-loaded by ai_engine.py, not a real
+|                              # env var export needed (see section 4)
+|-- pipeline.py                # CATEGORY_REGISTRY (numeric order). run_pipeline()
+|                              # (Type 1, also used as Type 2/3's main-sheet resolution)
+|                              # and run_pipeline_type2_3() (adds Fare Rule(POO) handling)
+|-- template_writer.py         # writes to the REAL template; COLS_BY_CATEGORY,
+|                              # dynamic row-shifting, style preservation.
+|                              # write_to_template() (Type 1, one sheet) and
+|                              # write_to_template_type2() (Type 2/3, duplicates the
+|                              # sheet for POO output)
+|-- template_schema.py         # reads field labels from the real template's own
+|                              # header cells (CATEGORY_HEADER_ROWS)
+|-- ai_engine.py                # generic AI call, one implementation
+|-- ai_specs/                   # per-category instruction + few-shot (yaml) --
+|                              # only exists where actually used or genuinely
+|                              # plausible later (see the AI spec coverage policy
+|                              # in section 4)
+|-- categories/
+|   |-- base.py                 # CategoryResolver base class -- has_mapping check,
+|   |                          # generic _resolve_type2_3() fallback + resolve_poo_single()
+|   |                          # hook, NONE_PHRASES, shared AI-call helper
+|   `-- cat01_eligibility.py ... cat33_no_mapping.py   # one file per implemented category
+|-- data_mapping_final.json    # authoritative reference (all CAT01-33, Type1/2/3
+|                              # columns) parsed from the user's Final_Data_Mapping.xlsx --
+|                              # reference only, NOT called by any code (by design)
+|-- CLAUDE.md                   # this file
+|-- test_from_real_files.py    # Type 1 end-to-end (real XLSM -> real template)
+|-- test_ai_fallback_e2e.py    # proves the AI-fallback branch really fires
+|-- test_type2.py               # Type 2 end-to-end (main + POO, two output sheets)
+`-- test_type3.py               # Type 3 end-to-end (main + POO, two output sheets)
+```
+
+Sibling directories, each with their own generator script producing the
+XLSM inputs the test scripts above read:
+- `input_files/` (Type 1) -- `build_pricebooks.py` -> `V1-ABC1 Type1.xlsm`, `V1-ABC2 Type1.xlsm`
+- `input_files_type2/` -- `build_pricebooks_type2.py` -> `V1-ABC1-Type2.xlsm`, `V2-ABC2-Type2.xlsm`
+- `input_files_type3/` -- `build_pricebooks_type3.py` -> `V1-DEF1-Type3.xlsm`, `V1-DEF2-Type3.xlsm`
+
+**Known issue, discovered this session**: `input_files_type2/` and
+`input_files_type3/` no longer exist on disk, and `input_files/` now
+holds real production pricebook files (HKF1/HKF2, Cargolux, Tianqi)
+instead of the original synthetic `V1-ABC1 Type1.xlsm`/`V1-ABC2
+Type1.xlsm`. This means `test_from_real_files.py`, `test_type2.py`, and
+`test_type3.py` currently fail with `FileNotFoundError` -- confirmed NOT
+caused by any code change in this session, the folders/files were simply
+removed or reorganized outside of it. All real verification this session
+was done directly against the real files in `input_files/` via
+`run_new_filing.py` (see section 14) or inline scripts instead. If these
+regression scripts are needed again, the synthetic fixtures need
+regenerating via their `build_pricebooks*.py` scripts first.
+
+**Removed during cleanup** (obsolete/superseded, kept in git history only if
+needed later): `test_run.py` + `run_and_export.py` (dict-mock-based, from
+before real XLSM reading existed -- fully superseded by
+`test_from_real_files.py`), `test_ai_prompt.py` (isolated demo, superseded
+by the fuller `test_ai_fallback_e2e.py`), `rule_tariff_table.py` (dead code
+once `test_run.py` was removed -- `template_writer.py` has its own internal
+`_write_rule_tariff_table()`, unrelated), `data_mapping_parsed.json`
+(superseded by `data_mapping_final.json`), and stale generated `.xlsx`/
+`.pdf`/`.json` artifacts in the project root (regenerate on demand by
+running the test scripts).
+
+| Cat | Name | Status | Branch pattern |
+|---|---|---|---|
+| 01 | Eligibility | Coded | 3-branch: NONE / REFER-YES (lookup) / REFER-NO (parse override text) / else AI |
+| 02 | Day/Time | Coded | 2-branch: NONE or REFER-NO = blank / REFER-YES (lookup) / else AI |
+| 03 | Seasonality | Coded | Text-pattern (no flag column): NONE / REFER-YES (row-expansion from tab) / else AI. **FIXED (real-file bug)**: `CAT03-Seasonality` has a two-row header identical in shape to CAT11's -- the generic single-row reader picked the GROUP row (its merged "SEASONALITY DATES" cell coincidentally contains keyword "SEASONALITY"), leaking the sub-header row in as bogus data and dropping `FareClassFamily`/`FirstDate`/`LastDate`/`SeasonType` to `None` on EVERY row silently. Now has its own `_read_cat03_seasonality()` two-row reader (see section 7). `FareClassFamily`/dates now looked up by keyword, not exact string (real header has an embedded newline: `"FARE BASIS /\nFARE CLASS FAMILY"`). `"All"`/3-letter codes -> LOC1/LOC2 (not Zone). `OW/RT` now resolved per-row from the "Output" tab via `FareClassFamily` (see section 13) instead of always `None` |
+| 04 | Flight Application | Coded | Direction-based row expansion (Outbound/Inbound), "Except:" clause parsing, Carrier Table No.1 supporting table. **Confirmed constants/fixes**: `Table` always `"NEW"`; `Flight1` always `"SQ"` (previously wrongly hardcoded `"GA"`, traced to this project's own synthetic test data using Garuda Indonesia as the example carrier); `"All"` classifies as LOC (not Zone); `OW/RT` resolved per-row from the "Output" tab via `FareClassFamily` (see section 13). Handles THREE real tab shapes for `CAT04-FlightApplication`: two-row header w/ OUTBOUND/INBOUND split (`_read_cat04_flight_application()`), single "FLIGHT APPLICATION" column w/ no direction split (`_read_cat04_flight_application_single_column()`, applies the same text to both O/I), and generic single-row fallback |
+| 05 | Advance Reservations | Coded | Reads shared `CAT050607` tab's ADV PURCHASE columns. **FIXED**: same `FareClassFamily` keyword-lookup + `"All"`-as-LOC + per-row `OW/RT` fixes as CAT03/04 (see section 13) -- was previously always `None` on real files (exact-string lookup didn't match the real embedded-newline header) |
+| 06 | Minimum Stay | Coded | Reads `CAT050607`'s MIN STAY columns; Measured/Return-Travel-From TSI constants. **FIXED**: same `FareClassFamily`/LOC/`OW/RT` fixes as CAT05 |
+| 07 | Maximum Stay | Coded | Reads `CAT050607`'s MAX STAY columns -- user's DataMapping text said "MIN STAY" (likely copy-paste error), flagged LOW pending confirmation. **FIXED**: same `FareClassFamily`/LOC/`OW/RT` fixes as CAT05/06 |
+| 08 | Stopovers | Coded | No flag column, no REFER TO in sample -> straight to AI (`Max Permitted` keyword, `No Charge` inferred from "FREE") |
+| 09 | Transfers | Coded | `has_mapping=True` but produces only a JSON-only `Note` field via AI -- verified directly against template: NO Excel columns exist for this category at all |
+| 10 | Permitted Combinations | Partial | Sub-row Fare Rules structure (new pattern). Circle Trip/End-on-End/Open-Jaw/Qualifying-106/107 deterministic (explicit IF/THEN rules given); Side Trips/Notes via AI. Record 3 Tables 101-104 and Qualifying 108/109 not implemented -- no mapping instructions exist yet |
+| 11 | Blackout Dates | Coded | Text-pattern: NONE / REFER-YES (row-expansion from `CAT11-Blackouts` tab, same LOC-vs-Zone pattern as CAT03) / else AI. **FIXED**: tab has a real TWO-row header (like CAT050607) -- `_read_cat11_blackouts()` now handles it correctly. `Day/Range = "Range"` when both Date1/Date2 present (confirmed). **Also FIXED this session**: same `FareClassFamily` keyword-lookup + `"All"`-as-LOC + per-row `OW/RT` fixes as CAT03/04/05/06/07 |
+| 12 | Surcharges | Skeleton only | REFER TO detected but no `CAT12-Surcharges` tab sample/mapping exists yet. `SurchargeType` deliberately left empty. Charge Information + both Applies-To geo blocks entirely unmapped |
+| 13 | Accompanied Travel | Coded | `has_mapping=False`, verified via template: no category-specific columns exist at all |
+| 14 | Travel Restrictions | Skeleton | Only OW/RT + common fields. `On/After`/`On/Before (Commence)` explicitly deferred by DataMapping ("no request to code these yet for Type 1") -- kept as real output fields, always None |
+| 15 | Sales Restrictions | Coded | Combines AI (Location1-3 Type/Value/Exclude + 7 Ticketing-mode flags, from main condition text + "Ticketing Mode" sub-row) with deterministic lookup. **CORRECTED**: only `TicketMustBeIssuedOn*` comes from Filing Instructions "Sales From/To" -- `ReservationMustBeOn*` stays empty (an earlier version wrongly populated both from the same source). New: `pricebook_data.get_filing_instruction()` + `xlsm_loader._read_filing_instructions()` (key-value shaped tab, not row-based) |
+| 16 | Penalties | Skeleton | Almost nothing mapped -- only AltGenRule/OW/RT confirmed. Two real sub-rows exist ("Voluntary Change/Refund/No show" -- pointer to unseen source; "Notes" -- free-text service fee) with no extraction rule |
+| 17 | HIP/Mileage Exceptions | Coded | Reason `NONE_PHRASES`/`_is_none_condition()` was added to base.py: sample condition is "UNLESS OTHERWISE SPECIFIED DOES NOT APPLY", a different phrasing than the usual exact-match -- both are now recognized as "no restriction" |
+| 18 | Ticket Endorsement | Coded | `has_mapping=False` -- confirmed since the very start of this project (rich-looking text, but DataMapping explicitly says no field-level mapping exists) |
+| 19 | Children/Infant Discounts | Coded | PSGR Type fixed by POSITION (Row1=CNN/Row2=UNN/Row3=INS/Row4=INF, confirmed -- not parsed from label text). MIN/MAX Age parsed from the sub-row LABEL. Percent/TicketDesignator/Accompanied parsed via regex from the condition text's LAST "FOR ... FARE TYPE:-" clause (confirmed heuristic when multiple clauses exist -- since there's no fare-context input to pick the "correct" one). `NoDiscount="YES"` when `Percent==100` is an unconfirmed single-example heuristic, always flagged when applied |
+| 20, 21, 22, 26, 27, 28, 29, 33 | Tour Conductor / Agent / Other Discounts / Groups / Tours / Visit Another Country / Deposits / Voluntary Refunds | Coded | `has_mapping=False` -- DataMapping explicitly says "no category-specific mapping defined" for every one of these. Template DOES have real category-specific columns for several (e.g. CAT20/21 mirror CAT19's Passenger Type/Age/PSGR Occur shape), but no data source exists to populate them |
+| 23 | Miscellaneous Provisions | Coded | `has_mapping=False`. "Override Dates" explicitly marked CONSTANT "Not needed -- the format uses calendar dates". **Column layout quirk**: this category's block is shifted one position left vs every other category -- LOC1 is missing entirely (Zone1 sits first), AltGenTariff/AltGenRule/OW-RT are at O/P/M instead of the usual P/Q/N |
+| 31 | Voluntary Changes | Coded | `has_mapping=False` for category-specific fields (pointer to unseen "FARE FAMILY FEE CONDITIONS" source, same pattern as CAT16). AltGenRule works automatically via the standard per-category IPRG mechanism (confirmed: Fare Rules "IPRG 0011" -> AltGenRule="0011"). DataMapping also describes a Type-2-only override pattern (same shape as CAT14's) -- out of scope for Type 1. **Has `ai_spec_file` configured (not yet active)** -- see note below on AI spec coverage |
+| 24, 25, 30, 32 | -- | N/A | CAT24/30/32 don't exist in ATPCO's numbering (confirmed gap). CAT25 (Fare By Rule) exists in Fare Rules text but has **no corresponding block in the real template at all** -- not implemented, nowhere to write it |
+
+**Type 1 scope is now feature-complete**: every category from CAT01 through CAT33 that has a real template block has a resolver, verified against a real XLSM file → real Excel template write, with all 29 category titles confirmed in order and no row collisions.
+
+**AI spec coverage policy**: `ai_specs/catXX_spec.yaml` only exists for a category if either (a) it actually calls `_ai_extract_entry()` in its resolver, or (b) DataMapping does NOT explicitly say "no category-specific mapping defined" for it (i.e. there's real free text being ignored that could plausibly need AI later, like CAT16/CAT31's "FARE FAMILY FEE CONDITIONS" pointer). Categories where DataMapping explicitly confirms no mapping exists (CAT13, 18, 20-22, 23, 26-29, 33) deliberately have NO spec file -- there's no free text being discarded, so a spec would have nothing grounded to describe. This keeps specs meaningful (each one either active or a genuine "activate me later" placeholder) rather than mass-generating empty boilerplate for every category.
+
+---
+
+## 7. Bugs already found & fixed (don't reintroduce these)
+
+1. **Wrong sheet targeted.** The template's `(FINAL TEMPLATE) CAT 1-CAT 33 w` sheet is **hidden**; Excel shows `(FINAL TEMPLATE) CAT 1-CAT 33 ` (no trailing "w") by default. `template_writer.py` now targets the visible sheet name, with a fallback, and force-sets `sheet_state="visible"`.
+
+2. **`openpyxl.insert_rows()` silently drops cells** on this file (likely due to many merged cells / comments elsewhere in the sheet). Replaced with a manual `_shift_rows_down()` that unmerges/shifts/remerges explicitly, moving **both value and `._style`** together (an earlier attempt only moved values, leaving stale formatting -- a "misplaced banner" bug).
+
+3. **`AltGenRule` (IPRG code) was category-blind.** `common_fields.py`'s `_extract_iprg_code()` used to grab the *first* IPRG value found across *any* category's Fare Rules row -- invisible bug because CAT01-04 all happened to share `"AB60"`. Broke the moment CAT08 (`"HK60"`) was added. Fixed by threading `category` through `extract_common_fields(anchor_row, pricebook_data, category)`.
+
+4. **`has_mapping=False` returned zero rows, not one.** `entries=[]` meant a no-mapping category (CAT09) never got written at all. The template expects exactly one row per fare (its own placeholder rows prove this). Fixed to return `[self._blank_entry()]`.
+
+5. **CAT050607's two-row header mis-detected.** The group row's merged cell ("ADV PURCHASE / MIN STAY / MAX STAY") contains all three keywords as substrings, tying with the true sub-header row's score in `find_header_row()`. Fixed tie-breaking to prefer the **later** row (`score >= best_score` instead of `>`).
+
+6. **CAT050607's `UNIT` column repeats 3x** (once per ADV PURCHASE/MIN STAY/MAX STAY pair) -- a flat header can't disambiguate. `_read_cat050607()` pairs each `UNIT` positionally with the value column immediately to its left.
+
+7. **Row-number source column varies.** Most category blocks number rows in column A, but CAT10's Qualifying Tables 106/107 number in column **P**. `_write_block()` now takes a `no_col` parameter (defaults to `"A"`).
+
+8. **Used a post-shift row number as a "template constant".** When adding CAT09's `START_ROW`, a row number was copied from an *already-shifted* output file instead of the original blank template -- always read `START_ROW` constants from the untouched template, never from a filled/shifted copy.
+
+9. **`data_mapping_parsed.json` has a recurring copy-paste pattern**: several categories' LOC1/Zone1/LOC2/Zone2/Fare Class/Family rows wrongly point to the `CAT 03-Seasonality` tab instead of their own category's tab (confirmed twice now -- CAT05 should read `CAT050607`, CAT11 should read `CAT11-Blackouts`, both confirmed by the user against real DataMapping text). **When a new category's parsed entry shows this exact tab reference, treat it as suspect and flag it for confirmation rather than trusting it verbatim.**
+
+10. **Table-writing order must match the template's own top-to-bottom row order, not registry/dict order.** Qualifying Tables 106/107 sit physically BETWEEN CAT10 and CAT11 in the real template, but were being written AFTER CAT11-19 (since they were appended to `write_to_template()` after the main category loop). Once CAT11-19 started inserting their own rows, `cumulative_offset` included shifts from categories that come AFTER the qualifying tables in the file -- over-shifting their position into unrelated merged cells and crashing. Fixed by splitting category writing into ordered phases (CAT05-10 → Qualifying Tables 106/107 → CAT11-19) so every write happens in the same order as the physical file.
+
+11. **CAT23's column layout is shifted one position left vs every other category** -- LOC1 is missing entirely from its Markets block (Zone1 sits where LOC1 normally would), and AltGenTariff/AltGenRule/OW-RT sit at O/P/M instead of the usual P/Q/N. Found only by directly inspecting the template row-by-row -- a reminder that column positions should never be assumed consistent across categories without checking.
+
+12. **Data validations (dropdowns) and embedded images are anchored to fixed row positions and don't move with `_shift_rows_down()`.** The original template has 92 dropdown-list validations and 8 images, none of which our row-shifting logic touches (it only moves cell values and styles). Once enough categories needed more than the template's 3-row default capacity, dropdowns/images ended up sitting on whatever content happened to occupy their original row position -- visually scattered across unrelated rows. Fixed with `_strip_validations_and_images()`, called once at the start of `write_to_template()` before any shifting happens: clears `ws.data_validations.dataValidation` and `ws._images`. This is a deliberate tradeoff (the output file loses interactive dropdowns/decorative images) accepted because this is a generated filing-data file, not something a human fills in by hand.
+
+13. **`dict(CATXX_COLS)` copy-paste without re-verifying the FULL column width.** CAT26-29 were assumed to share CAT20's column layout (which does have RI/Table/CAT at W/X/Y) via `CAT26_COLS = dict(CAT20_COLS)`, but an earlier verification pass only checked columns up to S (`range(1,20)`), never actually confirming W/X/Y existed for CAT26-29 specifically. They don't -- these four categories' blocks stop at column V (Sequence), no RI/Table/CAT at all. Caught only when the user visually inspected the actual file and asked "shouldn't this category only go up to column V?". **Lesson: when checking a category's column width, always scan a wide range (e.g. columns 1-45) rather than a range that happens to be "enough" for the categories checked so far -- and never assume two categories share a layout just because they're structurally similar (both "Passenger Type" categories, in this case) without directly confirming it.**
+
+14. **`find_header_row()`'s scan window was capped at 20 rows.** Every real sample tested so far only had 1-2 rows of preamble before a table's real header, which isn't a representative stress test. A file with more extensive notes/legend text before the table (e.g. 30+ rows) would have silently picked the wrong row, since the real header was never scanned at all. Increased the default to 100 rows. Verified with a synthetic 35-row-preamble test (beyond the old cap) that the fix actually works, not just assumed. Residual risk, not fully eliminated: the scan window is now wide enough that a genuine DATA row could theoretically score a coincidental tie with the real header row on the same keywords, and the existing "prefer the later row on a tie" rule (needed for CAT050607's two-row header) would then pick the wrong one -- hasn't happened in any real file seen so far, but worth knowing about if a future file's data content coincidentally echoes its own header text.
+
+15. **Real sheet names have formatting variance an exact match misses.** Confirmed on a real file where `"CAT03-Seasonality"` is actually named `"CAT03- Seasonality"` (one extra space). `_find_sheet(wb, expected_name)` added -- matches after stripping all spaces and lowercasing, so this kind of formatting-only difference doesn't hide a tab that's genuinely present.
+
+16. **Category numbers come through inconsistently from real files.** Sometimes a string with stray whitespace (`"04 "`), sometimes a bare float (`10.0`, `11.0`, ...) since Excel auto-types a cell without a leading zero as a number instead of text. Every category resolver looks categories up by a zero-padded 2-digit string (`"04"`, `"10"`) -- without normalization this silently failed to match, hiding CAT04's (trailing space) and every CAT10+'s (float) actual condition text. Fixed with `_normalize_cat_number()`.
+
+17. **Fare Rules' category-code column header varies.** Some real files merge it into a single `"RULE CATEGORIES"` header cell instead of separate `"RULE"`/`"CATEGORIES"` columns -- same data, different header text. Both spellings are now aliased to the same internal `"CAT"` key.
+
+18. **IPRG header text can carry an annotation.** A real file had the header read `"IPRG\n[Check with FMU]"` instead of a bare `"IPRG"` (same column, extra text appended). `row.get("IPRG")` alone silently returned `None` on that file, dropping every `AltGenRule`. Fixed via `_get_iprg_value()` -- keyword-based (`key.strip().upper().startswith("IPRG")`), not exact match.
+
+19. **`_shift_rows_down()` crashed on merged cells straddling the insertion point** (`AttributeError: 'MergedCell' object attribute 'value' is read-only`). Fixed to also unmerge (but deliberately NOT re-merge) any merged range where `r.min_row < insert_at <= r.max_row` before the shift happens.
+
+20. **CAT03/04/05/06/07/11 all silently dropped `FareClassFamily` (and therefore per-row `OW/RT`) on every real file.** The real header text is `"FARE BASIS /\nFARE CLASS FAMILY"` (an embedded newline), but every resolver's lookup expected a plain space or no separator at all -- `.get()` on the wrong exact string just returns `None`, no error, no signal anything was wrong. Same root cause across all five categories, found once by diagnosing CAT03 in detail and then confirmed present verbatim in the other four via direct inspection. Fixed with a keyword-based `_lookup()` helper in each resolver (checks `all(kw in key.upper() for kw in keywords)` rather than exact-matching the whole header string). See section 13 for the related `OW/RT` mechanism this feeds into.
+
+21. **CAT03's two-row header was mis-detected as the GROUP row, not the sub-header row** -- same two-row shape as CAT11-Blackouts/CAT050607 (`ORIGIN | DESTINATION | FARE BASIS... | SEASONALITY DATES` merged group row, with `SEASONALITY | PERIOD Start | PERIOD End` as the real sub-header one row below), but the generic `_sheet_to_rows()` reader picked the group row because its merged `"SEASONALITY DATES"` cell coincidentally contains the keyword `"SEASONALITY"` and out-scored the true sub-header row on the old flat keyword search. Effect: the sub-header row itself got read in as a bogus first DATA row, and `PERIOD Start`/`PERIOD End`/`SEASONALITY` never became real dict keys at all (they only exist on the row that was never selected) -- every CAT03 row's `FareClassFamily`/`FirstDate`/`LastDate`/`SeasonType` came out `None`, silently. Fixed with a dedicated `_read_cat03_seasonality()` two-row reader (same pattern as `_read_cat11_blackouts()`), located via keywords specific enough to only match the true sub-header row (`["PERIOD Start", "PERIOD End"]`, not the ambiguous `"SEASONALITY"`).
+
+22. **CAT04's `Flight1` was hardcoded to `"GA"`.** Traced to this project's own synthetic test data, which happened to use Garuda Indonesia as its example carrier -- not a real constant. Confirmed via real files and explicit user confirmation: `Flight1` is always `"SQ"`.
+
+23. **Real Type 3 file's `Fare Rule(POO)` sheet uses a different value-column label than Type 2's.** `_read_fare_rule_poo()`'s `find_header_row()` keyword list only recognized `"For Info Only"` (Type 2's POO label) -- Type 3's real POO sheet reuses the main sheet's single-column label, `"Same as Base Rule OR Amend Base Rule as indicated"`, instead. `value_col` silently stayed `None` for every category on a real Type 3 POO sheet, which routed every single category to AI unnecessarily (confirmed: reduced AI calls from 22 down to 8 on the same real file once fixed). Broadened the keyword list to accept both labels (plus `"IPRG Rule"`).
+
+24. **Real Type 2 file's Fare Rules header had its own label shifted out of position.** The `"Rule Categories"` header cell sat one column to the RIGHT of where the category-code data (`"CAT 01"`, `"RBD"`, ...) actually starts, with no `"Category Description"` header at all -- every other column's header (Same as Base / override text / Alt Gen Rule) was correctly positioned, so a blanket column-shift would have broken those. Fixed narrowly: `_find_cat_code_column()` detects that ONE column by CONTENT (scanning sample rows for `"CAT NN"`/`"RBD"`-shaped values) instead of trusting the header row's own label position; the description column is then derived positionally (`cat_col + 1`).
+
+---
+
+## 8. Design decisions worth knowing
+
+- **Output is organized per-category** (`{"CAT01": [...], "CAT02": [...]}`), matching the real template's separate per-category blocks -- NOT one merged wide row per fare. An early design sketch did this wrong; corrected before real coding started.
+- **`data_mapping_final.json` (formerly `data_mapping_parsed.json`, removed during cleanup) is intentionally NOT wired into any code.** It's a parsed reference (all CAT01-33, Type 1/2/3 columns) from the user's `Final_Data_Mapping.xlsx`, used by hand when writing new `ai_specs/*.yaml` files or cross-checking a category's real column layout or Type 2/3 mapping. Keep it that way unless explicitly asked to change it.
+- **Template capacity is dynamic, not fixed.** Every category block ships with only 3 example rows before the next category's header -- `_ensure_capacity()` shifts everything below down as needed, and `cumulative_offset` is threaded through `write_to_template()` so every subsequent category/table's position stays correct.
+- **CAT04's Carrier Table No.1 linking**: the main row's own sequential position (its `No`) is copied into the supporting table's `CAT4 ID` column -- not a separate "Table 1" field (which turned out to be an unrelated CONSTANT pointer label, not a join key).
+- **Sheet type (1/2/3) comes from the (not-yet-built) upload form**, entered manually alongside RULE/TARIFF/file -- not detected from the file itself. `GAP`-sourced fields only apply their mapping when `sheet_type == 1`.
+
+## 9. Open items
+
+- `ANTHROPIC_API_KEY` (the `AI_PROVIDER=anthropic` path) still has never been tested for real -- but AI extraction itself IS now verified end-to-end with real calls, via `AI_PROVIDER=openai_compatible` against a self-hosted model (see section 4). The mock path is what's now untested/unused in practice.
+- The original synthetic test fixtures for Type 2/3 (`input_files_type2/`, `input_files_type3/`, and Type 1's `V1-ABC1 Type1.xlsm`) no longer exist on disk -- `test_from_real_files.py`/`test_type2.py`/`test_type3.py` currently fail with `FileNotFoundError`. See section 5 for detail. Not caused by this session's changes; not yet fixed either.
+- CAT07's MIN STAY vs MAX STAY source column -- needs explicit user confirmation.
+- CAT10: Record 3 Tables 101-104, Qualifying Tables 108/109, and whether Qualifying Table 107 should split into 2 rows (one per Open-Jaw sub-row clause) -- all unconfirmed.
+- Mixed per-field confidence (vs. current per-entry) would be needed if CAT04's Geographic Application block (documented as GAP-sourced from the same text as `Travel`, but with no field-level parsing rule) is ever implemented.
+- `template_schema.py`'s `CATEGORY_HEADER_ROWS` is hardcoded per category, not auto-detected.
+- `"OW"` (one-way only) has never actually appeared in any real Type 2/3 sample seen so far -- every row in every real file checked is `"RT/OW"`. The normalization mapping (section 13) is implemented and should handle it correctly if it does appear, but that specific branch is unconfirmed against real data.
+
+## 10. Type 2/3 architecture (new, first pass)
+
+Type 1's pricebook structure (`REFER TO`/`NONE UNLESS OTHERWISE SPECIFIED`
+per category) does NOT apply to Type 2/3. Instead:
+
+- **One shared mechanism across ALL categories**: every "Rule Categories"
+  row has `Same as Base Reference Fare (Yes/No/NA)?`. `Yes`/`NA` → blank
+  entry (follows Base Fare, nothing to extract). `No` → override text
+  exists in `If "NO", amend Base Rule as follows:`, but no category has a
+  confirmed extraction rule for it yet (CAT01/02/03 are the only ones
+  analyzed so far, and DataMapping explicitly defers all three: "No
+  request to code these yet").
+- **`AltGenRule` source column differs per sheet type**: `IPRG` (Type 1),
+  `For HO/TCS: Alt Gen Rule IPRG` (Type 2), `IPRG Rule` (Type 3) --
+  unconfirmed whether Type 3 really differs this way or it's a doc typo
+  (open item).
+- **Preamble rows** (`RBD`, `CAT 50`) sit above `CAT 01` in the sheet --
+  skipped by only keeping rows whose "Rule Categories" starts with `"CAT "`.
+- **A second sheet, `Fare Rule(POO)`**, may exist -- detected by
+  **keyword** (`"poo"` substring in the sheet name), not an exact name
+  match, since naming varies (`"Fare Rule(POO)"` vs `"Fare Rules POO"`).
+  Its value is currently always `"FOLLOW BASE FARE"` (copy whatever the
+  main "Fare Rules" sheet resolved for that category) -- no other value
+  has been seen yet, so that's the only branch implemented.
+
+### New files
+- `pricebook_data_type2.py` -- `PricebookDataType2`, much simpler shape
+  than Type 1's (one row per category: `same_as_base`, `override_text`,
+  `alt_gen_rule`).
+- `xlsm_loader.py` additions: `load_pricebook_type2()`, returns
+  `(main_pricebook, poo_pricebook)` -- `poo_pricebook` is `None` if no
+  `"poo"`-named sheet exists.
+- `categories/base.py`: `resolve()` now routes `sheet_type in (2, 3)`
+  to a NEW generic `_resolve_type2_3()` BEFORE the `has_mapping` check --
+  this method lives in the base class (not per-category) because the
+  Yes/No/NA mechanism is identical everywhere. Sets `bundle["common_override"]`
+  (dict of common-field values that take precedence over
+  `common_fields.py`'s defaults) for the dynamic `SAME AS BASE REFERENCE
+  FARE ?` value, Type-2/3-sourced AltGenRule, and (added later, see
+  section 13) `OW/RT`. **6 categories DO override this method themselves**
+  (CAT10, CAT14, CAT15, CAT16, CAT19, CAT31 -- see their own sections
+  below) and each needed the same `OW/RT` addition made to their own
+  `common_override` dict independently.
+- `pipeline.py`: `run_pipeline()` now merges `bundle.get("common_override",
+  {})` into every row (no-op for Type 1, which never sets it). New
+  `run_pipeline_type2_3()` resolves the main sheet via the normal
+  `run_pipeline()`, then separately walks `Fare Rule(POO)`, copying the
+  matching main-sheet row through when POO value is `"FOLLOW BASE FARE"`.
+- `template_writer.py`: core writing logic extracted into
+  `_write_pipeline_output_to_sheet(ws, pipeline_output, anchor_rows)` so
+  it can run against two different worksheets. New
+  `write_to_template_type2()` duplicates the main sheet via
+  `wb.copy_worksheet()` (renamed `"CAT 1-CAT 33 (POO)"`, kept ≤31 chars --
+  Excel's sheet-name limit) and writes `output_poo` into the copy.
+- `common_fields.py`: `_extract_iprg_code()` now checks
+  `hasattr(pricebook_data, "get_fare_rules_row")` before calling it --
+  `PricebookDataType2` doesn't have this method (Type 2/3's AltGenRule
+  comes entirely through `common_override` instead), so this just
+  returns `None` gracefully rather than crashing.
+- `input_files_type2/build_pricebooks_type2.py` + two generated skeleton
+  files (`V1-ABC1-Type2.xlsm` RULE=2KLM, `V2-ABC2-Type2.xlsm` RULE=3MNO
+  with 2 TARIFFs) -- CAT01/02/03/14/CAT50/RBD have real example content
+  from chat; CAT04-19 are placeholder "Yes" rows for realistic file shape.
+- `test_type2.py` -- end-to-end test, verified: all confirmed categories
+  correctly resolve `SAME AS BASE REFERENCE FARE ?` dynamically from the
+  Yes/No/NA column (not hardcoded "NA" like Type 1), and the POO sheet
+  correctly mirrors the main sheet's resolved values.
+
+### Open items (Type 2/3)
+- **CAT15-19, 26/28/29, CAT31 now fully implemented** for Type 2/3, all confirmed from real samples in one batch:
+  - CAT15: regex extracts `TicketMustBeIssuedOnAfter` from "FOR SALES ON/AFTER <date>"; the rest (ticket stock/ticketing mode/notes) routes through the same AI mechanism as Type 1.
+  - CAT16 & CAT31: **confirmed to be separate real rows** (resolved the earlier "shared row" ambiguity -- both categories' Type 2 "Category Description" just happens to read "Penalties / Rebooking" coincidentally). `AltGenRule` is embedded IN the override text ("...tag IPRG rule <code>"), extracted via regex, since the separate IPRG column is blank for these two.
+  - CAT19: `resolve_poo_single()` hook added to `base.py` -- lets a category handle a non-"FOLLOW..." POO value directly (maps to `NoDiscount`) instead of falling through to blind AI. Confirmed working with real POO text that differs from the main sheet's text.
+  - `base.py`'s Yes/No/NA check now also recognizes `"NOT APPLICABLE"` as equivalent to `"NA"` (confirmed from CAT26/28/29's real sample -- previously only exact `"NA"` matched).
+- **CAT25 ("Ticketing Code") -- confirmed to exist in Type 2 Fare Rules, but NOT implemented.** Real sample: `CAT 25 | Ticketing Code | All ODs | No | Code per "Corporate ID" above`. No corresponding block exists anywhere in the real Type 1 template (confirmed earlier in this project) -- there's nowhere to write this even if resolved. Flagged for the user, not silently skipped or invented.
+- CAT12/13/17/18's `OW/RT` is "No request to code these yet" for Type 2 (vs. CAT03/10/11/14/15/19 which have the Edifact/NDC mechanism) -- confirms this is genuinely per-category, not universal (see note above about not generalizing it into base.py). This is now moot for the generic path anyway -- `_lookup_owrt_type23()` (section 13) resolves project-wide for EVERY Type 2/3 category regardless of whether DataMapping calls it out per-category, since there's no per-category Fare Class context to narrow it further either way.
+- Whether Type 3's `IPRG Rule` column is real or a documentation typo -- still no Type 3 sample data existed at the time this was written. (Real Type 3 samples are now in regular use -- see section 13 -- but this specific column hasn't been re-checked against them.)
+- CAT04-09 not analyzed for Type 2/3 at all yet.
+- **New master reference**: `data_mapping_final.json`, parsed from user-uploaded `Final_Data_Mapping.xlsx` -- has ALL categories (CAT01-33) with Type1/2/3 columns cleanly separated. Check this FIRST before asking the user for a category's Type 2/3 mapping again.
+
+### CAT10 Type 2/3 -- fully implemented, the first real example of a
+### category needing its own Type 2/3 override
+
+Confirmed from real data: CAT10 has its OWN sub-row structure in Type 2
+(Circle Trips / Side Trips / End-on-End / Half Round Trip..., matching
+Type 1's shape) -- `Cat10Resolver._resolve_type2_3()` overrides the
+generic base.py fallback, reusing the EXACT SAME regex logic as Type 1
+(`_open_jaw_value()`, `_table107()` unchanged), just reading
+`override_text` from Type 2 sub-rows instead of `FARE RULE CONDITIONS`.
+Sub-row labels are matched case-insensitively (`_get_subrow_ci()`) since
+Type 2's real sample capitalizes differently ("End-on-End combination"
+vs Type 1's "End-on-End Combination").
+
+**Confirmed and important**: `Fare Rule(POO)` for CAT10 is NOT
+`"FOLLOW BASE FARE"` -- it has its own sub-rows too, with the Open-Jaw
+clause's text genuinely differing (POO drops "AND RULE <WC21/.../WC29>",
+main sheet keeps it). Per project decision, `run_pipeline_type2_3()`
+routes any multi-row POO category straight to AI (`_ai_fallback_entry()`,
+using the resolver's own `ai_spec_file`/`output_fields`) rather than
+guessing a copy-through rule -- verified end-to-end
+(`source_branch="POO_AI_EXTRACTED"`).
+
+Also fixed while building this: `_table107()`'s regex only captured the
+FIRST token after "THIS RULE AND RULE" (e.g. just `<WC21/`) -- now
+captures the full bracketed list up to "IN ANY TARIFF".
+
+## 11. Type 3 architecture
+
+Confirmed via real screenshots + full CAT01-33 sample (files: `V1-DEF1-Type3.xlsm`,
+`V1-DEF2-Type3.xlsm`): structurally similar to Type 2 but with ONE KEY
+DIFFERENCE -- the main sheet has a SINGLE combined column ("Same as Base
+Rule OR Amend Base Rule as indicated") instead of Type 2's two separate
+columns (Yes/No/NA flag + override text). The POO sheet's structure is
+IDENTICAL to Type 2's POO sheet.
+
+**Implementation approach**: rather than rewriting every category's
+`_resolve_type2_3()` for a third time, `xlsm_loader._synthesize_same_as_base()`
+converts Type 3's single column into the SAME `{same_as_base, override_text}`
+shape Type 2 produces (`"FOLLOW ..."` or `"NOT APPLICABLE"`/`"NA"` → synthetic
+`"Yes"`, no override; anything else → synthetic `"No"`, override_text = the
+column's content verbatim). `load_pricebook_type3()` returns the same
+`PricebookDataType2` class Type 2 uses -- **zero changes needed to any
+category resolver** to support Type 3. Verified end-to-end: CAT10, 14, 15,
+16, 19 (main and POO) all produced correct results using their existing
+Type 2 code, unmodified.
+
+Two minor real-data-driven tweaks made along the way (not Type-3-specific,
+just caught while testing with Type 3 samples):
+- CAT10's Notes sub-row lookup now also accepts the label "Other" (not just
+  "Notes"/"Other (notes)") -- Type 3's real sample uses this bare form.
+- CAT15's date regex broadened from requiring "SALES ON/AFTER" to matching
+  any "ON/AFTER <date>" -- Type 3's real sample phrases it "TICKETS MUST BE
+  ISSUED ON/AFTER <date>" instead.
+
+Sheet name detection reused the existing keyword logic (`"fare rule"`
+substring, excluding `"poo"`) without any changes -- correctly identified
+`"CORP_FARE RULES(CN)"` and `"CORP_FARE RULES-POO"` despite completely
+different naming from Type 2's `"Fare Rules"`/`"Fare Rule(POO)"`.
+
+### Open items (Type 3)
+- CAT04-09 still not analyzed in detail for Type 2/3 (both types) --
+  current real samples for these all happen to be "FOLLOW BASE FARE"/"Yes",
+  so the generic SAME_AS_BASE path is exercised but no override text case
+  has been seen yet.
+- ~~OW/RT's Edifact/NDC normalization table is still missing for both Type
+  2 and Type 3~~ -- **implemented and verified**, see section 13.
+
+## 12. Granular AI fallback + Excel highlight (new)
+
+**Trigger rule** (`categories/base.py`, `needs_ai_fallback(text, extracted_value)`):
+text has real content AND isn't a known no-op phrase (`NONE_PHRASES` or
+`"FOLLOW ..."` prefix) AND the deterministic regex/logic came back `None`
+-> try AI as a second attempt before leaving the field blank.
+
+**Where this is wired in** (all confirmed working via real test cases,
+not just written -- see CLAUDE.md bug list update below):
+- `CAT14` (Type 2/3 only -- Type 1's fields stay permanently deferred by
+  design, untouched): `OnAfterCommence`/`OnBeforeCommence`.
+- `CAT15` (Type 2/3): `TicketMustBeIssuedOnAfter` is folded into the
+  SAME AI call CAT15 already makes for Location/Ticketing fields --
+  no extra API call, just one more field in the schema.
+- `CAT16` / `CAT31` (Type 2/3): `AltGenRule`, when the embedded "IPRG
+  rule <code>" regex fails on real text.
+- `CAT19` (Type 1): `Percent`/`TicketDesignator`/`AccompaniedTravel`/
+  `SameCMPT`/`AccompanyingMinAge`, via a TARGETED AI call (only those 5
+  fields, not the full 9-field output_fields list -- PSGRType/MinAge/
+  MaxAge/NoDiscount aren't derivable from an isolated clause snippet).
+- `CAT10`: deliberately UNCHANGED -- Circle Trip/End-on-End stay a raw
+  copy (no validation), and the Open-Jaw "Restricted" default stays a
+  confirmed rule, not a failure case, per explicit user decision.
+
+**`ai_used` flag**: set at the single choke point (`ai_engine.py`'s
+`extract_with_ai()`, both the mock-response and real-response paths) --
+every direct or indirect AI call inherits it automatically. For the
+handful of call sites that manually copy specific fields out of an
+`ai_result` dict instead of using the whole thing (CAT10, CAT15, CAT16,
+CAT31, CAT19), `entry["ai_used"] = ai_result.get("ai_used", False)` is
+set explicitly alongside those copies.
+
+**Excel highlight**: `template_writer.py`'s `_write_block()` applies
+`AI_USED_FILL` across the FULL WIDTH of any row where `row.get("ai_used")`
+is true -- per-row granularity (not per-cell), per explicit user decision
+to keep the change small. Verified: rows from purely deterministic
+categories are NOT highlighted; rows that genuinely called AI (whether
+the call succeeded, mocked, or fell back) are. **Color changed from light
+yellow (`FFF2CC`) to bright yellow (`FFFF00`)** per explicit user request
+-- more visually obvious for a loader scanning the output.
+
+**Fixed along the way**: CAT02 had a field-name bug -- output_fields had
+a single `"DayOfWeek"` key, but `template_writer.py`'s `CAT02_COLS` (correct)
+expects 7 separate keys (`Mon`..`Sun`) matching the template's 7 separate
+columns (AD-AJ). The mismatch meant those columns were ALWAYS blank
+regardless of extraction quality, since the field names never matched.
+Fixed by splitting into 7 fields. Also removed a dead `"OWRT"` field from
+both CAT02 and CAT03 (the real common field is `"OW/RT"` with a slash,
+handled separately by `common_fields.py` -- `"OWRT"` without a slash
+never matched anything in `COLS` and was never written anywhere).
+
+Also discovered: the real template's day-of-week header row literally
+reads "M","T","W","T","F","S","S" (Tue/Thu both "T", Sat/Sun both "S") --
+ambiguous as AI prompt labels on their own. `_ai_extract_entry()` gained
+an optional `label_override` parameter; CAT02 passes
+`DAY_LABEL_OVERRIDE` (`{"Mon": "Monday (M)", ...}`) to disambiguate.
+
+## 13. OW/RT mechanism (Type 1 and Type 2/3)
+
+`OW/RT` is a common field (written on every category's output row,
+alongside `PRICEBOOK NAME`/`RULE`/`TARIFF`/`AltGenTariff`/`AltGenRule`),
+but unlike those, its real value depends on the airline's per-Fare-Class
+data, which lives on a COMPLETELY DIFFERENT sheet/value-domain depending
+on sheet type. Confirmed this session, both directions, against real
+files.
+
+### Type 1 -- `common_fields.py`'s `_lookup_owrt()`
+
+Source: the pricebook's `"Output"` tab, one row per Fare Class (NOT one
+row per RULE -- confirmed on a real file where the same RULE had both
+`OW/RT=2` and `OW/RT=3` across different Fare Class rows). Values are
+numeric codes: `1=OW only, 2=RT, 3=OW/RT (both)` (`OWRT_CODE_MAP`).
+
+- **Generic fallback** (`extract_common_fields()`'s default for every
+  category): only resolves to something if EVERY row in the Output tab
+  agrees on the same code -- otherwise returns `None` rather than
+  guessing. This is the only option for categories with no Fare Class
+  context of their own.
+- **Per-row override** (categories with their OWN Fare Class per row --
+  CAT03, CAT04, CAT05, CAT06, CAT07, CAT11, confirmed so far): each
+  resolver calls `_lookup_owrt(pricebook_data, entry["FareClassFamily"])`
+  and overwrites the generic default for that specific row. `fare_class_text`
+  can combine multiple codes (`"VT6HKR / KT6HKR"`, `"V/K"`) -- matches
+  against ANY of them, via prefix (`.startswith()`, after stripping a
+  trailing `"-"`) since a resolver's `FareClassFamily` is often a prefix
+  (`"KV6-"`) while the Output tab stores full codes (`"KV6HKR"`). Still
+  returns `None` (not a guess) if the matched rows disagree on the code,
+  or if `FareClassFamily` is itself `"ALL"`/`"ALL FARE CLASSES"` and the
+  whole Output tab disagrees.
+- Every per-row override lives in that category's own `_map_row()`/
+  `_resolve_impl()` -- see the category status table above for which of
+  CAT03/04/05/06/07/11 fixed this. CAT12 (Surcharges) would need it too
+  but has no `CAT12-Surcharges` tab reader yet (skeleton only).
+
+### Type 2/3 -- `common_fields.py`'s `_lookup_owrt_type23()`
+
+**Completely different source and value domain from Type 1** -- this was
+the single biggest gap closed this session, previously undocumented and
+unimplemented (the "Output" tab doesn't exist on Type 2/3 files at all).
+
+Source: a separate real per-fare-class data sheet -- NOT `"Fare Rules"`/
+`"...POO"`, and NOT named consistently across real files
+(`"Edifact_Filing_CDM_A7J8F"`, `"NDC_Filing_CDM_A7J8F"`, `"Faresheet "`,
+confirmed on 4 different real samples). Located by CONTENT, not name:
+`xlsm_loader._find_owrt_sheet()` scans every sheet for a literal
+`"RT/OW"` header cell (has always been sheet index 0 on every real sample
+so far, but located by content anyway rather than trusting that). Values
+are TEXT, not numeric: `"RT/OW"` (both directions permitted) or `"OW"`
+(one-way only) -- `OWRT_TEXT_MAP`. Only `"RT/OW"` has been seen in real
+data so far (see section 9's open items).
+
+No per-category Fare Class context exists for the generic Type 2/3
+branch (unlike Type 1's CAT03/04/05/06/07/11) -- `_lookup_owrt_type23()`
+only resolves project-wide, same "only if every row agrees" conservatism
+as Type 1's generic fallback.
+
+**Wired in TWO places**, both needed:
+- `categories/base.py`'s generic `_resolve_type2_3()` -- covers every
+  category that doesn't override it.
+- The 6 categories that DO override `_resolve_type2_3()` themselves
+  (CAT10, CAT14, CAT15, CAT16, CAT19, CAT31) each needed their own
+  `common_override` dict updated too -- fixing only `base.py` would have
+  silently left these 6 categories still missing `OW/RT`, since they
+  never fall through to the generic method at all.
+
+New/changed files: `xlsm_loader.py` (`_find_owrt_sheet()`,
+`_read_owrt_rows()`, wired into both `load_pricebook_type2()` and
+`load_pricebook_type3()`), `pricebook_data_type2.py` (`PricebookDataType2`
+now carries `owrt_rows`), `common_fields.py` (`_lookup_owrt_type23()`,
+`OWRT_TEXT_MAP`).
+
+Verified end-to-end against real files, both Type 2 (Cargolux CDM/NDC)
+and Type 3 (Tianqi): every category correctly resolves `OW/RT = "OW/RT"`
+(matches the real data, where every row is literally `"RT/OW"`). A
+category correctly stays `None` only when its own Fare Rules row wasn't
+found in that specific file at all (an unrelated, pre-existing branch,
+not an OW/RT bug).
+
+## 14. How to run
+
+The stand-in for the not-yet-built upload form -- until that exists, this
+is where a new batch of real pricebook files gets run.
+
+```bash
+cd fare_filling_poc
+.venv\Scripts\python.exe run_new_filing.py --sheet-type 1 --wo-id 4002 \
+    --file "..\input_files\HKF1.xlsm" --rule-tariff "HKF1(FBRA3P)" \
+    --file "..\input_files\HKF2.xlsm" --rule-tariff "HKF2(FBRA3P,FBRINPV)"
+```
+
+`run_new_filing.py` flags: `--sheet-type` (1/2/3, applies to every `--file`
+in the run -- run again separately for a different type), `--wo-id`
+(written to the output template's cover cell), `--file` (repeatable, one
+pricebook per flag), `--rule-tariff` (repeatable, `"RULE(TARIFF1,TARIFF2)"`,
+paired in order with `--file`), `--output` (optional, defaults to
+`SQ Fare Filing_<WO_ID>_Type<N>.xlsx` next to the script).
+
+Produces, per run: the filled Excel template; `pipeline_output_new_filing.json`
+(pure filing data); and a timestamped run log,
+`run_log_<WO_ID>_Type<N>_<ddmmyyyy_hhmmss>.txt` -- progress, every AI call
+(provider/model/timing/token usage), and an end-of-run summary (total
+time, AI call counts, token totals) via `run_logger.py`. The log is kept
+deliberately separate from the JSON/xlsx outputs -- it never touches
+filing data, it's diagnostics only.
+
+Before running, `ai_config.env` (see section 4) needs `AI_PROVIDER`,
+`AI_BASE_URL`/`AI_MODEL` (or `ANTHROPIC_API_KEY` for the other provider)
+set -- without it, every AI call falls back to a clearly-labeled mock.
+
+The older regression scripts (`test_from_real_files.py`, `test_type2.py`,
+`test_type3.py`) are currently broken -- see section 5/9, their fixture
+files no longer exist. `run_new_filing.py` against real files in
+`input_files/` is the verified way to exercise the pipeline right now.

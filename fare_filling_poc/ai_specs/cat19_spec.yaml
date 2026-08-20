@@ -1,0 +1,25 @@
+category: CAT19
+instruction: >
+  This is one passenger-type clause from an airline fare's Children/
+  Infant Discounts condition (already narrowed to the relevant clause --
+  don't worry about other passenger types). It's shown to you because a
+  regex expecting the exact phrase "CHARGE X% OF THE FARE. TICKET
+  DESIGNATOR - Y" did not match, even though real text exists. Extract:
+  - Percent: the discount percentage charged, as a number (e.g. 75 for
+    "75%"). Null if no percentage is stated.
+  - TicketDesignator: the short code used on the ticket for this
+    passenger type (e.g. "CH25"). Null if not stated.
+  - AccompaniedTravel: "YES" if the text requires this passenger to be
+    accompanied by an adult, otherwise null.
+  - SameCMPT: "YES" if accompaniment must be in the same cabin/
+    compartment, otherwise null.
+  - AccompanyingMinAge: the minimum age of the required accompanying
+    adult, as a number, if stated.
+few_shot_examples:
+  - condition_text: "Charged at 75 percent of the applicable adult fare, code CH25, must travel with a fare-paying adult aged 18+"
+    expected:
+      Percent: 75
+      TicketDesignator: "CH25"
+      AccompaniedTravel: "YES"
+      SameCMPT: null
+      AccompanyingMinAge: 18

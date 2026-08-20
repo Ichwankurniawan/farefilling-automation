@@ -1,0 +1,12 @@
+category: CAT02
+source: >
+  Grounded directly in Data Mapping_1 sheet, CATEGORY 2 - Day/Time,
+  field "Not Apl" (sourcing=GAP): "Fare Rules tab » Column 'Same as Base
+  Rule OR Amend Base Rule as indicated', or Column 'FARE RULE CONDITIONS'"
+instruction: >
+  This is an airline fare's Day/Time condition free text -- it did not
+  match "REFER TO..." nor exact "NONE UNLESS OTHERWISE SPECIFIED", so a
+  human loader would read it directly to determine day-of-week, time-of-
+  day, or departure-timing restrictions. Extract only what the text
+  explicitly states; leave any field the text doesn't address as null.
+few_shot_examples: []

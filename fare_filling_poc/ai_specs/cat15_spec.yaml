@@ -1,0 +1,25 @@
+category: CAT15
+instruction: >
+  This combines an airline fare's Sales Restrictions condition text (which
+  may name countries/cities where tickets may or may not be sold) and its
+  "Ticketing Mode" sub-row (which states how tickets must be issued, e.g.
+  "ELECTRONIC TICKETING"). Extract:
+  - Location1Type/Location1Value, Location2Type/Location2Value,
+    Location3Type/Location3Value: up to 3 named locations. Type is
+    usually "Nation" for a country name. Leave unused location slots null.
+  - Location1Exclude/2/3: "YES" only if the text says tickets may NOT be
+    sold there (exclusionary); leave null for an inclusive/only-here
+    restriction (the common case).
+  - TicketingElectronic/TicketingMAIL/TicketingPTA/TicketingPTAEqualsTicket/
+    TicketingSelfTicket/TicketingSATOCATO/TicketingAutoTicketing: set the
+    one(s) matching the ticketing mode text to "YES", others null.
+few_shot_examples:
+  - condition_text: >
+      Main condition: TICKETS MAY ONLY BE SOLD IN HONGKONG AND MACAU.
+      Ticketing Mode: TICKETS MUST BE ISSUED BY ELECTRONIC TICKETING
+    expected:
+      Location1Type: "Nation"
+      Location1Value: "Hongkong"
+      Location2Type: "Nation"
+      Location2Value: "Macau"
+      TicketingElectronic: "YES"

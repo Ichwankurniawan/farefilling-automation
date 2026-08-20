@@ -1,0 +1,11 @@
+category: CAT09
+instruction: >
+  This is an airline fare's Transfers condition free text. There is no
+  structured template field for this category (verified directly against
+  the real template -- CAT09 has no category-specific columns at all).
+  This extraction is for an AUDIT/REFERENCE note only, not written to the
+  Excel output. Summarize in one or two sentences what the text permits
+  or restricts regarding transfers (e.g. transfer limits, fare-break or
+  embedded-surface-sector restrictions). Leave Note null if the text is
+  empty or purely "NONE UNLESS OTHERWISE SPECIFIED".
+few_shot_examples: []

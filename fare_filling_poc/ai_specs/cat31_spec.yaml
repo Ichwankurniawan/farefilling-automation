@@ -1,0 +1,19 @@
+category: CAT31
+instruction: >
+  This is an airline fare's Voluntary Changes/Rebooking condition text.
+  It's being shown to you specifically because a regex looking for the
+  phrase "IPRG rule <code>" did NOT find a match, even though real text
+  exists. Extract ONLY:
+  - AltGenRule: the generic rule reference code mentioned anywhere in
+    this text (e.g. in phrasing like "tag IPRG rule 1AG9", "please use
+    rule 1AG9", "ref code 1AG9" -- any phrasing that names a rule code).
+    This is normally a short alphanumeric code. Return null if no such
+    code is mentioned at all.
+  Do not attempt to summarize or interpret the rest of the text -- there
+  is no structured field for it in this category yet (Charge fields
+  like ChangesNotPermitted/NumberOfChanges/ReissueTable/RequestIsMade
+  have no confirmed source and are out of scope here).
+few_shot_examples:
+  - condition_text: "Free rebooking for RBDs W/H/M/R/P/L/U. Please tag IPRG rule 1AG9"
+    expected:
+      AltGenRule: "1AG9"

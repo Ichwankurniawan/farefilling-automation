@@ -1,0 +1,8 @@
+category: CAT14
+instruction: >
+  This is an airline fare's Travel Restrictions condition free text. Most
+  fields for this category are deferred (not coded for Type 1 yet). This
+  spec exists as a placeholder for the rare case the condition text is
+  free-form rather than "REFER TO..." or a recognized "no restriction"
+  phrase. Extract nothing beyond what's obviously stated; leave fields null.
+few_shot_examples: []

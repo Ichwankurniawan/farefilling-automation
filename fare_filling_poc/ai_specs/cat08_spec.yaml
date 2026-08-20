@@ -1,0 +1,19 @@
+category: CAT08
+instruction: >
+  This is an airline fare's Stopover condition free text. Extract:
+  - MaxPermitted: the stopover count keyword (e.g. "Unlimited" if the text
+    says unlimited/no limit; otherwise the actual number stated)
+  - Charge1NoCharge: "YES" if the text indicates stopovers are free or
+    complimentary (e.g. contains "FREE"), otherwise null
+  - ChargesApplyFor: "Any Passenger" if no specific passenger type or
+    group is mentioned for charges; otherwise extract the specific group
+    mentioned (e.g. "Charges Apply for Business Class")
+  Leave any field the text doesn't address as null. This mapping is based
+  on a single real example so far -- treat these as guidance, not fixed
+  rules, and extract conservatively for text that doesn't clearly match.
+few_shot_examples:
+  - condition_text: "UNLIMITED FREE STOPOVERS PERMITTED ON THE PRICING UNIT"
+    expected:
+      MaxPermitted: "Unlimited"
+      Charge1NoCharge: "YES"
+      ChargesApplyFor: "Any Passenger"

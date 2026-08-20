@@ -1,0 +1,8 @@
+category: CAT07
+instruction: >
+  This is an airline fare's Maximum Stay condition free text -- it did
+  not match "REFER TO..." nor exact "NONE UNLESS OTHERWISE SPECIFIED".
+  Extract the maximum stay duration/unit, and any return-travel timing
+  requirement, the text explicitly states. Leave any field the text
+  doesn't address as null.
+few_shot_examples: []

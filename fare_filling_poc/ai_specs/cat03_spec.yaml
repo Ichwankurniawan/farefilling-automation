@@ -1,0 +1,16 @@
+category: CAT03
+source: >
+  Grounded directly in Data Mapping_1 sheet, CATEGORY 3 - Seasonality,
+  field "Not Apl" (sourcing=GAP): "Fare Rules tab » Column 'Same as Base
+  Rule OR Amend Base Rule as indicated', or Column 'FARE RULE CONDITIONS'".
+  Note: the sheet separately confirms Seasonal/Promotional is sourced
+  from the CAT03-Seasonality tab's "Title" row (GAP) -- this AI path is
+  only for when the condition text itself is free-form, not for the
+  REFER-TO/tab-lookup branch.
+instruction: >
+  This is an airline fare's Seasonality condition free text -- it did not
+  match "REFER TO..." nor exact "NONE UNLESS OTHERWISE SPECIFIED", so a
+  human loader would read it directly to determine date-range or seasonal
+  restrictions. Extract only what the text explicitly states; leave any
+  field the text doesn't address as null.
+few_shot_examples: []

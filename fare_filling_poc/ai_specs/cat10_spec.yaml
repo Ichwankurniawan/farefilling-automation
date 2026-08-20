@@ -1,0 +1,15 @@
+category: CAT10
+instruction: >
+  This covers the CAT10 Combinations sub-rows that have no deterministic
+  IF/THEN rule defined yet: "Side Trips" and "Notes". Extract:
+  - SideTripsPermitted: a short summary of whether side trips are
+    permitted, and any condition stated (e.g. "Not Permitted",
+    "Permitted with X").
+  - Notes: the note text itself, summarized if long; null if the text is
+    just a placeholder like "-", "NIL", or empty.
+  Leave a field null if its sub-row wasn't provided or has no content.
+few_shot_examples:
+  - condition_text: "Side Trips: NOT PERMITTED\nNotes: -"
+    expected:
+      SideTripsPermitted: "Not Permitted"
+      Notes: null
