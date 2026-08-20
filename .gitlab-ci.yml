@@ -1,0 +1,102 @@
+# CI for the fare-filing automation pipeline + web upload form.
+#
+# Scoped deliberately narrow for now: catches import/syntax breakage and
+# the exact regression classes already found once by hand -- the
+# HTML/JS id-mismatch pattern (webapp-static-consistency), and the
+# "required on a hidden <input> silently blocks submit" browser bug
+# (webapp-smoke-test, ci/browser_smoke_test.py) that a real user actually
+# hit before it was fixed.
+#
+# Deliberately does NOT exercise the real AI-fallback pipeline against
+# real pricebook files: a shared CI runner has no route to the
+# self-hosted AI endpoint, and real production pricebook samples are
+# intentionally excluded from this repo (see .gitignore). See the
+# pipeline-regression-real-files job below for that gap.
+
+stages:
+  - lint
+  - test
+
+default:
+  image: python:3.12-slim
+
+variables:
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PLAYWRIGHT_BROWSERS_PATH: "$CI_PROJECT_DIR/.cache/playwright"
+
+import-sanity:
+  stage: lint
+  cache:
+    key: pip-$CI_COMMIT_REF_SLUG
+    paths: [.cache/pip]
+  script:
+    - python -m venv .venv
+    - .venv/bin/pip install --upgrade pip -q
+    - .venv/bin/pip install -r fare_filling_poc/requirements.txt -q
+    - |
+      .venv/bin/python -c "
+      import sys, importlib
+      sys.path.insert(0, 'fare_filling_poc')
+      for m in ['pipeline', 'xlsm_loader', 'common_fields', 'template_writer',
+                'template_schema', 'ai_engine', 'run_logger', 'intake_matcher',
+                'pricebook_data', 'pricebook_data_type2']:
+          importlib.import_module(m)
+      print('core modules import cleanly')
+      "
+    - |
+      .venv/bin/python -c "
+      import ast, pathlib
+      for p in pathlib.Path('fare_filling_poc/categories').glob('*.py'):
+          ast.parse(p.read_text(encoding='utf-8'), filename=str(p))
+      print('all category resolvers parse cleanly')
+      "
+
+webapp-static-consistency:
+  stage: lint
+  script:
+    - |
+      python -c "
+      import re
+      html = open('webapp/static/index.html', encoding='utf-8').read()
+      ids = set(re.findall(r'id=\"([a-zA-Z0-9_-]+)\"', html))
+      js = open('webapp/static/app.js', encoding='utf-8').read()
+      refs = set(re.findall(r'getElementById\(\"([a-zA-Z0-9_-]+)\"\)', js))
+      missing = refs - ids
+      assert not missing, f'app.js references ids missing from index.html: {missing}'
+      print(f'HTML/JS id references consistent ({len(refs)} refs checked)')
+      "
+
+webapp-smoke-test:
+  stage: test
+  cache:
+    key: pip-playwright-$CI_COMMIT_REF_SLUG
+    paths: [.cache/pip, .cache/playwright]
+  script:
+    - python -m venv .venv
+    - .venv/bin/pip install --upgrade pip -q
+    - .venv/bin/pip install -r fare_filling_poc/requirements.txt -q
+    - .venv/bin/pip install playwright -q
+    - .venv/bin/playwright install --with-deps chromium
+    - .venv/bin/python -m uvicorn webapp.server:app --host 127.0.0.1 --port 8000 &
+    - sleep 3
+    - .venv/bin/python ci/browser_smoke_test.py
+  artifacts:
+    when: on_failure
+    paths: [ci/failure_*.png]
+    expire_in: 3 days
+
+# Real pipeline regression (test_from_real_files.py / test_type2.py /
+# test_type3.py) is intentionally NOT wired up to run automatically yet.
+# Their fixture files (input_files_type2/, input_files_type3/, the
+# original V1-ABC1 Type1.xlsm) no longer exist on disk -- see CLAUDE.md
+# section 5/9 -- and even once regenerated, running them needs a
+# reachable AI endpoint a shared CI runner won't have. Left as a
+# manual-trigger placeholder so this gap stays visible in the pipeline
+# rather than silently absent.
+pipeline-regression-real-files:
+  stage: test
+  when: manual
+  allow_failure: true
+  script:
+    - echo "Not yet wired up -- see the comment above this job in .gitlab-ci.yml"
+    - exit 1
