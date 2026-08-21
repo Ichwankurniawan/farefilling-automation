@@ -677,14 +677,53 @@ handful of call sites that manually copy specific fields out of an
 CAT31, CAT19), `entry["ai_used"] = ai_result.get("ai_used", False)` is
 set explicitly alongside those copies.
 
-**Excel highlight**: `template_writer.py`'s `_write_block()` applies
-`AI_USED_FILL` across the FULL WIDTH of any row where `row.get("ai_used")`
-is true -- per-row granularity (not per-cell), per explicit user decision
-to keep the change small. Verified: rows from purely deterministic
-categories are NOT highlighted; rows that genuinely called AI (whether
-the call succeeded, mocked, or fell back) are. **Color changed from light
-yellow (`FFF2CC`) to bright yellow (`FFFF00`)** per explicit user request
--- more visually obvious for a loader scanning the output.
+**Excel highlight is now per-CELL, not per-row** (changed from the
+original per-row design, per explicit later user request -- "highlight
+the cell instead of the whole row"). The original per-row version
+applied `AI_USED_FILL` across the FULL WIDTH of any row where
+`row.get("ai_used")` was true -- simple, but meant common fields
+(PRICEBOOK NAME/RULE/TARIFF/AltGenTariff/AltGenRule/OW-RT, which are
+NEVER AI-derived, in any category) got shaded too, purely for sharing a
+row with a genuinely AI-derived field, and a category with only 2 of 9
+fields AI-touched still had the other 7 shaded regardless.
+
+Mechanism: `ai_engine.py`'s `extract_with_ai()` now also returns
+`ai_fields` -- the subset of `output_fields` the AI actually populated
+(non-None), computed once at the single choke point. For a category that
+does WHOLE-entry extraction (`entry = self._ai_extract_entry(...)`, no
+selective harvesting -- most categories: CAT01-09, CAT11, CAT12, CAT17,
+and CAT10's POO fallback via `pipeline.py`'s `_ai_fallback_entry()`) this
+is already correct with zero extra work, since every field the AI
+returned non-None IS what the resolver keeps. For the categories that
+harvest only SOME AI-returned fields into a pre-existing entry with an
+`entry[f] = entry[f] or ai_result.get(f)` pattern (CAT10's Side Trips/
+Notes, CAT14, CAT15 x2 call sites, CAT16, CAT19, CAT31 -- 8 call sites
+total), `categories/base.py`'s new `_copy_ai_fields(entry, ai_result,
+field_names)` helper does the copy AND tracks, field-by-field, whether
+the FINAL value in `entry[f]` actually came from AI (empty before AND
+AI provided one) vs. was already deterministic (regex/lookup value
+wins, never overwritten, never marked) -- exactly preserving each site's
+original "regex wins over AI" semantics, just also tracking it. Union
+across multiple AI calls on the same entry, not overwrite (CAT15 makes
+two separate calls that can both contribute). CAT16/CAT31's `AltGenRule`
+is a special case -- it's a local variable threaded through
+`bundle["common_override"]`, never a key of `entry` itself, so those two
+sites mark `entry.setdefault("ai_fields", set()).add("AltGenRule")`
+directly instead of going through the helper.
+
+`template_writer.py`'s `_write_block()` then checks `field in
+row.get("ai_fields", ...)` per cell instead of blanket-filling all 90
+columns per row. Verified end-to-end against real files, not just unit
+tests: a real Type 1 run confirmed CAT08 (whole-entry) shaded only its 3
+AI-derived fields with common fields clean, and CAT15 (targeted) shaded
+only its 4 AI-derived Location fields; a real Type 3 run additionally
+confirmed the CAT10 POO-vs-main-sheet distinction holds exactly as
+documented above -- the SAME field names (CircleTripPermitted et al.)
+are correctly shaded on the POO sheet (legitimately whole-entry
+AI-derived there) and correctly NOT shaded on the main sheet (CAT10's
+main-sheet resolution is deliberately never AI-touched, unchanged from
+before). **Color stays bright yellow (`FFFF00`)**, only the highlighted
+area changed.
 
 **Fixed along the way**: CAT02 had a field-name bug -- output_fields had
 a single `"DayOfWeek"` key, but `template_writer.py`'s `CAT02_COLS` (correct)

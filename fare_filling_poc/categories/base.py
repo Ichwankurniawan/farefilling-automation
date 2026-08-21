@@ -201,3 +201,32 @@ class CategoryResolver:
             field_labels.update(label_override)
 
         return extract_with_ai(condition_text, fare_context, spec_path, self.output_fields, field_labels)
+
+    def _copy_ai_fields(self, entry, ai_result, field_names):
+        """
+        Copies each field in `field_names` from ai_result into entry
+        (entry[f] = entry[f] or ai_result.get(f) -- a pre-existing
+        deterministic value always wins, same as every call site already
+        did by hand), while tracking in entry["ai_fields"] exactly which
+        fields' FINAL value came from THIS AI call -- i.e. entry[f] was
+        empty beforehand AND ai_result actually provided one. Cumulative
+        across multiple AI calls on the same entry via set union, not
+        overwrite (CAT15 makes two separate AI calls that can both
+        contribute to the same entry).
+
+        This is the piece that makes per-CELL AI highlighting possible in
+        template_writer.py -- without it, "ai_used=True" only says
+        SOMETHING in this row came from AI, not which cell. Every
+        category that does WHOLE-entry extraction (entry = self.
+        _ai_extract_entry(...), no selective harvesting) doesn't need
+        this at all -- ai_engine.py's extract_with_ai() already computes
+        ai_fields correctly for that case, since every field it returns
+        non-None IS what the resolver keeps.
+        """
+        ai_fields = entry.setdefault("ai_fields", set())
+        for f in field_names:
+            was_empty = not entry.get(f)
+            entry[f] = entry.get(f) or ai_result.get(f)
+            if was_empty and ai_result.get(f) is not None:
+                ai_fields.add(f)
+        return entry

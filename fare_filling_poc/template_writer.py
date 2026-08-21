@@ -507,15 +507,33 @@ def _write_block(ws, rows, columns, start_row, max_col=90, no_col="A"):
     no_col: which column holds the row's own sequence number. Almost
     always "A", but CAT10's Qualifying Tables 106/107 number their own
     rows in column P instead (they're offset blocks starting at P, not A).
+
+    AI highlighting is per-CELL, not per-row: only the specific field(s)
+    a row's AI call actually populated get AI_USED_FILL, via
+    row["ai_fields"] (a set of field names -- see ai_engine.py's
+    extract_with_ai() and categories/base.py's _copy_ai_fields()).
+    Common fields (PRICEBOOK NAME, RULE, TARIFF, AltGenTariff, AltGenRule,
+    OW/RT) are never in ai_fields -- they're always deterministic, in
+    every category -- so they're never highlighted regardless of what
+    else in the row came from AI.
     """
     style_cache = [copy(ws.cell(row=start_row, column=c)._style) for c in range(1, max_col + 1)]
 
     for i, row in enumerate(rows):
         excel_row = start_row + i
+        ai_fields = row.get("ai_fields")
+        # Defensive fallback, not a path any current resolver actually
+        # exercises (every ai_used=True entry traces back to
+        # extract_with_ai(), which always sets ai_fields now -- confirmed
+        # by inspection of every AI call site in categories/*.py and
+        # pipeline.py's _ai_fallback_entry()): if something ever sets
+        # ai_used=True without going through ai_fields, fall back to the
+        # old whole-row behavior rather than silently highlighting nothing.
+        if ai_fields is None:
+            ai_fields = set(columns) if row.get("ai_used") else set()
+
         for c in range(1, max_col + 1):
             ws.cell(row=excel_row, column=c)._style = style_cache[c - 1]
-            if row.get("ai_used"):
-                ws.cell(row=excel_row, column=c).fill = AI_USED_FILL
 
         ws[f"{no_col}{excel_row}"] = i + 1
         for field, col_letter in columns.items():
@@ -528,6 +546,8 @@ def _write_block(ws, rows, columns, start_row, max_col=90, no_col="A"):
                 cell.value = normalized
                 if number_format:
                     cell.number_format = number_format
+                if field in ai_fields:
+                    cell.fill = AI_USED_FILL
 
 
 def _strip_validations_and_images(ws):

@@ -121,6 +121,14 @@ def extract_with_ai(condition_text, fare_context, spec_path, output_fields, fiel
         parsed["confidence"] = "LOW"
         parsed["flag_reason"] = "AI-extracted from free text -- needs human review"
         parsed["ai_used"] = True
+        # Which specific fields the AI actually populated (vs. left null
+        # because the text didn't address them) -- this is what makes
+        # per-CELL highlighting possible in template_writer.py instead of
+        # shading the whole row. A category resolver that harvests only
+        # some of these fields (e.g. CAT19 taking 5 of them) still needs
+        # to recompute this against what it actually keeps -- see
+        # categories/base.py's _copy_ai_fields().
+        parsed["ai_fields"] = {f for f in output_fields if parsed.get(f) is not None}
         return parsed
     except Exception as e:
         return _mock_response(output_fields, reason=f"Response parsing failed ({e}) -- fell back to blank, flagged")
@@ -223,4 +231,5 @@ def _mock_response(output_fields, reason):
     entry["confidence"] = "LOW"
     entry["flag_reason"] = reason
     entry["ai_used"] = True
+    entry["ai_fields"] = set()  # nothing was actually extracted -- no real value to highlight
     return entry

@@ -64,8 +64,7 @@ class Cat15Resolver(CategoryResolver):
             spec_path = os.path.join(AI_SPECS_DIR, self.ai_spec_file)
             ai_result = extract_with_ai(combined_text, {"rule_id": rule_id, "category": self.category},
                                          spec_path, AI_TARGET_FIELDS)
-            for f in AI_TARGET_FIELDS:
-                entry[f] = ai_result.get(f)
+            self._copy_ai_fields(entry, ai_result, AI_TARGET_FIELDS)
             entry["confidence"] = "LOW"
             entry["flag_reason"] = "Locations/Ticketing mode interpreted via AI -- needs review"
             entry["ai_used"] = ai_result.get("ai_used", False)
@@ -106,13 +105,13 @@ class Cat15Resolver(CategoryResolver):
 
             ai_result = extract_with_ai(override_text, {"rule_id": rule_id, "category": self.category},
                                          os.path.join(AI_SPECS_DIR, self.ai_spec_file), TYPE2_3_AI_TARGET_FIELDS)
-            for f in AI_TARGET_FIELDS:
-                entry[f] = ai_result.get(f)
+            self._copy_ai_fields(entry, ai_result, AI_TARGET_FIELDS)
             # Only use the AI's date guess as a FALLBACK -- if the regex
             # already found a date, trust that (it's a precise pattern
             # match); AI only fills in when the regex came back empty.
-            entry["TicketMustBeIssuedOnAfter"] = entry["TicketMustBeIssuedOnAfter"] or \
-                ai_result.get("TicketMustBeIssuedOnAfter")
+            # _copy_ai_fields already respects that (entry[f] or ai's
+            # value), it just also now tracks it for cell highlighting.
+            self._copy_ai_fields(entry, ai_result, ["TicketMustBeIssuedOnAfter"])
             entry["confidence"] = "LOW"
             entry["flag_reason"] = "Ticketing mode/other details interpreted via AI -- needs review"
             entry["ai_used"] = ai_result.get("ai_used", False)

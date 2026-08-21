@@ -73,8 +73,7 @@ class Cat14Resolver(CategoryResolver):
             if needs_ai_fallback(override_text, entry["OnAfterCommence"]) and \
                needs_ai_fallback(override_text, entry["OnBeforeCommence"]):
                 ai_result = self._ai_extract_entry(override_text, rule_id)
-                entry["OnAfterCommence"] = entry["OnAfterCommence"] or ai_result.get("OnAfterCommence")
-                entry["OnBeforeCommence"] = entry["OnBeforeCommence"] or ai_result.get("OnBeforeCommence")
+                self._copy_ai_fields(entry, ai_result, ["OnAfterCommence", "OnBeforeCommence"])
                 entry["confidence"] = ai_result["confidence"]
                 entry["flag_reason"] = ai_result["flag_reason"]
                 entry["ai_used"] = ai_result.get("ai_used", False)

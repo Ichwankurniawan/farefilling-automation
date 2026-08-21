@@ -74,6 +74,11 @@ class Cat16Resolver(CategoryResolver):
                                              os.path.join(AI_SPECS_DIR, self.ai_spec_file), ["AltGenRule"])
                 alt_gen_rule = ai_result.get("AltGenRule")
                 entry["ai_used"] = ai_result.get("ai_used", False)
+                # AltGenRule isn't a key of `entry` here (it flows through
+                # common_override below instead) -- mark it directly so
+                # template_writer.py can still highlight its specific cell.
+                if ai_result.get("AltGenRule") is not None:
+                    entry.setdefault("ai_fields", set()).add("AltGenRule")
                 entry["flag_reason"] = (entry["flag_reason"] or "") + \
                     " | AltGenRule attempted via AI (no regex match found)"
                 branch = "AI_EXTRACTED"

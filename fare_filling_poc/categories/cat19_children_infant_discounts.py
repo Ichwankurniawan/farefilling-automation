@@ -94,11 +94,8 @@ class Cat19Resolver(CategoryResolver):
                                          os.path.join(AI_SPECS_DIR, self.ai_spec_file),
                                          ["Percent", "TicketDesignator", "AccompaniedTravel",
                                           "SameCMPT", "AccompanyingMinAge"])
-            entry["Percent"] = entry["Percent"] or ai_result.get("Percent")
-            entry["TicketDesignator"] = entry["TicketDesignator"] or ai_result.get("TicketDesignator")
-            entry["AccompaniedTravel"] = entry["AccompaniedTravel"] or ai_result.get("AccompaniedTravel")
-            entry["SameCMPT"] = entry["SameCMPT"] or ai_result.get("SameCMPT")
-            entry["AccompanyingMinAge"] = entry["AccompanyingMinAge"] or ai_result.get("AccompanyingMinAge")
+            self._copy_ai_fields(entry, ai_result, ["Percent", "TicketDesignator", "AccompaniedTravel",
+                                                     "SameCMPT", "AccompanyingMinAge"])
             entry["ai_used"] = ai_result.get("ai_used", False)
             flags.append("Percent/TicketDesignator not found via regex -- attempted via AI")
 

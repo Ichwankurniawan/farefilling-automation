@@ -62,8 +62,7 @@ class Cat10Resolver(CategoryResolver):
             spec_path = os.path.join(AI_SPECS_DIR, self.ai_spec_file)
             ai_result = extract_with_ai(combined_text, {"rule_id": rule_id, "category": self.category},
                                          spec_path, ["SideTripsPermitted", "Notes"])
-            entry["SideTripsPermitted"] = ai_result.get("SideTripsPermitted")
-            entry["Notes"] = ai_result.get("Notes")
+            self._copy_ai_fields(entry, ai_result, ["SideTripsPermitted", "Notes"])
             entry["confidence"] = "LOW"
             entry["flag_reason"] = "SideTripsPermitted/Notes interpreted via AI -- needs review"
             entry["ai_used"] = ai_result.get("ai_used", False)
@@ -130,8 +129,7 @@ class Cat10Resolver(CategoryResolver):
             spec_path = os.path.join(AI_SPECS_DIR, self.ai_spec_file)
             ai_result = extract_with_ai(combined_text, {"rule_id": rule_id, "category": self.category},
                                          spec_path, ["SideTripsPermitted", "Notes"])
-            entry["SideTripsPermitted"] = ai_result.get("SideTripsPermitted")
-            entry["Notes"] = ai_result.get("Notes")
+            self._copy_ai_fields(entry, ai_result, ["SideTripsPermitted", "Notes"])
             entry["confidence"] = "LOW"
             entry["flag_reason"] = "SideTripsPermitted/Notes interpreted via AI -- needs review"
             entry["ai_used"] = ai_result.get("ai_used", False)
