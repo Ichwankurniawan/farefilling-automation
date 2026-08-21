@@ -69,14 +69,24 @@ RULE_TARIFF_RE = re.compile(r"^\s*([A-Za-z0-9]+)\s*\(\s*([^)]+?)\s*\)\s*$")
 
 
 def _parse_rule_tariff(spec):
-    """Parses "RULE(TARIFF1,TARIFF2)" -> (rule, [tariff1, tariff2])."""
+    """
+    Parses "RULE(TARIFF1,TARIFF2)" -> (rule, [tariff1, tariff2]).
+
+    RULE/TARIFF are uppercased here to match intake_matcher.py's
+    --rule-tariff-text path (used by the web form) -- without this, the
+    two entry points could disagree on RULE/TARIFF casing for what's
+    otherwise the identical spec, which isn't just a display
+    inconsistency: pipeline.py groups/matches anchor rows by these exact
+    strings, so "hkf1" and "HKF1" would silently behave as two different
+    RULEs.
+    """
     m = RULE_TARIFF_RE.match(spec)
     if not m:
         raise argparse.ArgumentTypeError(
             f'--rule-tariff {spec!r} must look like "RULE(TARIFF1,TARIFF2)"'
         )
-    rule = m.group(1)
-    tariffs = [t.strip() for t in m.group(2).split(",") if t.strip()]
+    rule = m.group(1).upper()
+    tariffs = [t.strip().upper() for t in m.group(2).split(",") if t.strip()]
     if not tariffs:
         raise argparse.ArgumentTypeError(f"--rule-tariff {spec!r} has no TARIFF codes")
     return rule, tariffs

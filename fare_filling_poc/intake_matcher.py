@@ -116,7 +116,12 @@ def _parse_rule_tariff_text(text):
     specs = {}
     for m in RULE_GROUP_RE.finditer(text):
         rule = m.group(1).strip().upper()
-        tariffs = [t.strip() for t in m.group(2).split(",") if t.strip()]
+        # TARIFF is uppercased too, same as RULE -- both are fare-filing
+        # codes, not free text, and every downstream consumer (including
+        # run_new_filing.py's --rule-tariff CLI path) needs to agree on
+        # the same casing or "hkf1"/"HKF1" would silently behave as two
+        # different RULEs when grouped internally.
+        tariffs = [t.strip().upper() for t in m.group(2).split(",") if t.strip()]
         if not tariffs:
             continue
         specs[rule] = tariffs

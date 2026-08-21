@@ -13,10 +13,126 @@ CAT02, CAT03, CAT04 but NOT for CAT01 -- so we only auto-write "NEW" for
 those three.
 """
 
+import datetime
+import re
 from copy import copy
 from openpyxl.styles import PatternFill
 
+import run_logger
+
 RULE_TARIFF_START_ROW = 5   # "Rule & Tariff" table, columns A/B/C
+
+# ---- output normalization ----
+#
+# Root cause of the "inconsistent output formatting" bug (dates, case):
+# every value written here comes either straight from a real pricebook
+# cell (no house style enforced across different filers/years -- a date
+# might be a real Excel date-typed cell in one file and free-typed text
+# like "01APR26" in another) or from an AI extraction (ai_specs/*.yaml
+# never told the model what date format or case convention to use, so
+# it free-forms it per call). Every category resolver's .upper() calls
+# only normalize case for INTERNAL matching/comparison -- never what
+# actually gets stored in entry[field] for writing. This was the single
+# write chokepoint (both paths converge here), so it's the single fix
+# point too, rather than needing to patch ~26 category resolver files.
+
+# Every field across every category's COLS map that holds a date value
+# (confirmed exhaustively via `grep -noE '"[A-Za-z0-9]*(Date|OnAfter|
+# OnBefore)[A-Za-z0-9]*"' template_writer.py` against this file's own
+# COLS_BY_CATEGORY definitions -- 10 fields, 4 categories).
+DATE_FIELDS = {
+    "FirstDate", "LastDate",                                   # CAT03
+    "Date1", "Date2",                                          # CAT11
+    "OnAfterCommence", "OnBeforeCommence",                     # CAT14
+    "ReservationMustBeOnAfter", "ReservationMustBeOnBefore",   # CAT15
+    "TicketMustBeIssuedOnAfter", "TicketMustBeIssuedOnBefore",  # CAT15
+}
+DATE_NUMBER_FORMAT = "dd-mmm-yy"  # e.g. 01-Apr-26 -- explicit user decision
+
+# Fields deliberately EXEMPT from the uppercase pass: identifiers meant
+# to stay exactly as-typed for traceability back to their real source,
+# not fare-filing codes. PRICEBOOK NAME is the uploaded file's own
+# basename (see common_fields.py) -- uppercasing it would make it harder
+# to visually match an output row back to the real file on disk.
+NO_UPPERCASE_FIELDS = {"PRICEBOOK NAME"}
+
+_MONTH_LOOKUP = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "SEPT": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+_DATE_TEXT_RE = re.compile(r'^\s*(\d{1,2})[-\s]?([A-Za-z]{3,9})[-\s]?(\d{2,4})\s*$')
+# AI extraction has no fixed output format (see the module-level note
+# above) -- confirmed by real use, not assumed: the same pipeline run
+# that exercises this path produced "2017-10-01" (ISO) from one AI call
+# while other fields came back "01-OCT-17" (DD-MMM-YY) elsewhere in the
+# very same file. Both input shapes need to parse successfully even
+# though the OUTPUT is always normalized to DATE_NUMBER_FORMAT.
+_DATE_ISO_RE = re.compile(r'^\s*(\d{4})-(\d{1,2})-(\d{1,2})\s*$')
+
+
+def _parse_date_value(value):
+    """
+    Normalizes any date-shaped value this pipeline might produce -- a
+    real datetime.date/datetime (from an Excel date-typed source cell)
+    or free text in whatever separator/case/order the source pricebook
+    or an AI extraction happened to use ("01APR26", "1-Apr-2026",
+    "01 APR 2026", ISO "2026-04-01") -- into a real datetime.date.
+    Returns None if the text genuinely can't be parsed as a date, so the
+    caller can fall back to writing the original value rather than
+    silently losing it.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    if isinstance(value, datetime.date):
+        return value
+
+    text = str(value)
+    iso = _DATE_ISO_RE.match(text)
+    if iso:
+        year_s, month_s, day_s = iso.groups()
+        try:
+            return datetime.date(int(year_s), int(month_s), int(day_s))
+        except ValueError:
+            return None
+
+    m = _DATE_TEXT_RE.match(text)
+    if not m:
+        return None
+    day_s, mon_s, year_s = m.groups()
+    month = _MONTH_LOOKUP.get(mon_s.upper()[:4]) or _MONTH_LOOKUP.get(mon_s.upper()[:3])
+    if month is None:
+        return None
+    year = int(year_s)
+    if year < 100:
+        year += 2000 if year < 70 else 1900  # "26" -> 2026, "95" -> 1995
+    try:
+        return datetime.date(year, month, int(day_s))
+    except ValueError:
+        return None
+
+
+def _normalize_output_value(field, value):
+    """
+    Applied at the single write chokepoint (_write_block, below) --
+    covers every category and both the deterministic and AI-extracted
+    paths, since both converge here. Returns (value_to_write,
+    number_format_or_None).
+    """
+    if field in DATE_FIELDS:
+        parsed = _parse_date_value(value)
+        if parsed is not None:
+            return parsed, DATE_NUMBER_FORMAT
+        # Couldn't parse -- write the original value rather than
+        # silently dropping it (a visibly-unnormalized date beats a
+        # real date that vanished), but flag it so it's not mistaken
+        # for a successfully normalized one.
+        run_logger.log(f"[format] Could not parse {field}={value!r} as a date -- left as-is")
+        return value, None
+    if isinstance(value, str) and field not in NO_UPPERCASE_FIELDS:
+        return value.upper(), None
+    return value, None
 
 # Any row where a resolver set entry["ai_used"] = True gets this fill
 # applied across the whole row -- per-row granularity (not per-cell) per
@@ -407,7 +523,11 @@ def _write_block(ws, rows, columns, start_row, max_col=90, no_col="A"):
                 continue
             value = row.get(field)
             if value is not None:
-                ws[f"{col_letter}{excel_row}"] = value
+                normalized, number_format = _normalize_output_value(field, value)
+                cell = ws[f"{col_letter}{excel_row}"]
+                cell.value = normalized
+                if number_format:
+                    cell.number_format = number_format
 
 
 def _strip_validations_and_images(ws):
