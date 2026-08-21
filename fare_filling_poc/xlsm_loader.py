@@ -88,18 +88,16 @@ def _normalize_cat_number(value):
 def load_pricebook_from_xlsm(path, rule_id):
     wb = openpyxl.load_workbook(path, keep_vba=False, data_only=True)
 
-    fare_rules_rows = _sheet_to_rows(wb, "Fare Rules", SHEET_KEYWORDS["Fare Rules"])
     # Fare Rules' "RULE" column here actually holds the CATEGORY NUMBER
     # ("01", "02", ...) -- confirmed naming collision from earlier
-    # analysis: rename to "CAT" for PricebookData, which expects that key.
-    # Some real files merge this into a single "RULE CATEGORIES" header
-    # cell instead of separate "RULE"/"CATEGORIES" columns -- same data,
-    # different header text, so accept both.
-    for row in fare_rules_rows:
-        if "RULE" in row:
-            row["CAT"] = _normalize_cat_number(row.pop("RULE"))
-        elif "RULE CATEGORIES" in row:
-            row["CAT"] = _normalize_cat_number(row.pop("RULE CATEGORIES"))
+    # analysis; _read_fare_rules_with_subrows() renames it to "CAT" (some
+    # real files merge it into a single "RULE CATEGORIES" header cell
+    # instead of separate "RULE"/"CATEGORIES" columns -- same data,
+    # different header text, both accepted). It also carries that CAT
+    # number forward onto sub-rows that don't repeat it themselves (e.g.
+    # CAT10's "> Circle Trips") and captures their own label as SUB_ROW --
+    # see that function's docstring for the real-file bug this fixes.
+    fare_rules_rows = _read_fare_rules_with_subrows(wb["Fare Rules"], SHEET_KEYWORDS["Fare Rules"])
 
     tabs = {}
     for sheet_name in ("CAT03-Seasonality", "CAT04-FlightApplication"):
@@ -186,6 +184,88 @@ def _sheet_to_rows(wb, sheet_name, keywords):
         if all(v is None for v in row):
             continue
         result.append({headers[i]: row[i] for i in range(len(headers)) if headers[i] is not None})
+    return result
+
+
+def _read_fare_rules_with_subrows(ws, keywords):
+    """
+    Same output shape as _sheet_to_rows() for the "Fare Rules" sheet, but
+    fixes two real bugs _sheet_to_rows() has on this specific sheet --
+    confirmed by direct inspection of a real file, not assumed:
+
+    1. Several categories' condition text isn't one flat cell -- it's a
+       category header row ("10", "COMBINATIONS") immediately followed
+       by zero or more SUB-ROWS that repeat NO category number of their
+       own, just a "> <label>" text (e.g. "> Circle Trips", "> Side
+       Trips") in a column between the CAT-number column and "FARE RULE
+       CONDITIONS". Confirmed on CAT10, CAT15, CAT16, CAT19 in the same
+       real file. _sheet_to_rows() has no carry-forward logic, so these
+       sub-rows all silently land under CAT=None -- completely invisible
+       to get_fare_rules_subrows(), which every one of those four
+       resolvers depends on. This was masked because CAT15's Location
+       fields still partly extract from its own flat condition text
+       (the AI call just silently never sees the Ticketing Mode/Ticket
+       Stock sub-rows), and CAT10/CAT16/CAT19 have NO other fallback --
+       CAT19 (Children/Infant Discounts) came back completely empty
+       despite its extraction logic being fully designed and confirmed
+       correct, purely because the sub-rows it needs never reached it.
+
+    2. The sub-row label column has NO header text of its own in the
+       real file (confirmed: the header row's cell there is blank), so
+       _sheet_to_rows() drops that column's content entirely -- its
+       {headers[i]: row[i] ... if headers[i] is not None} comprehension
+       skips any column with a None header. Located here by CONTENT
+       instead (scanning for "> "-prefixed cells), same principle as
+       bug #24's _find_cat_code_column() -- there's no header to trust.
+    """
+    header_row = find_header_row(ws, keywords)
+    headers = [ws.cell(row=header_row, column=c).value for c in range(1, ws.max_column + 1)]
+
+    cat_col_idx = next(
+        (i for i, h in enumerate(headers) if h and str(h).strip().upper() in ("RULE", "RULE CATEGORIES")), None)
+
+    sub_label_col_idx = None
+    scan_limit = min(ws.max_row, header_row + 500)
+    for c in range(1, ws.max_column + 1):
+        for r in range(header_row + 1, scan_limit + 1):
+            v = ws.cell(row=r, column=c).value
+            if isinstance(v, str) and v.strip().startswith(">"):
+                sub_label_col_idx = c - 1
+                break
+        if sub_label_col_idx is not None:
+            break
+
+    result = []
+    current_cat = None
+    for row_idx in range(header_row + 1, ws.max_row + 1):
+        row_vals = [ws.cell(row=row_idx, column=c).value for c in range(1, ws.max_column + 1)]
+        if all(v is None for v in row_vals):
+            continue
+        row = {headers[i]: row_vals[i] for i in range(len(headers)) if headers[i] is not None}
+
+        cat_val = row_vals[cat_col_idx] if cat_col_idx is not None else None
+        sub_label = row_vals[sub_label_col_idx] if sub_label_col_idx is not None else None
+
+        # Pop the raw "RULE"/"RULE CATEGORIES" key here (same rename
+        # load_pricebook_from_xlsm used to do after the fact) -- must
+        # happen unconditionally, including on sub-rows where it's
+        # present but None, otherwise a stale None would sit alongside
+        # our carried-forward "CAT" below under a different key name.
+        row.pop("RULE", None)
+        row.pop("RULE CATEGORIES", None)
+
+        if cat_val is not None:
+            current_cat = _normalize_cat_number(cat_val)
+        elif sub_label and str(sub_label).strip().startswith(">") and current_cat is not None:
+            # A sub-row of whichever category header was most recently
+            # seen above it -- carry that category's number forward, and
+            # expose the sub-row's own label (leading "> " stripped) as
+            # SUB_ROW, matching what get_fare_rules_subrows() expects.
+            row["SUB_ROW"] = str(sub_label).strip().lstrip(">").strip()
+
+        if current_cat is not None:
+            row["CAT"] = current_cat
+        result.append(row)
     return result
 
 
