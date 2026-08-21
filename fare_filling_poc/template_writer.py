@@ -254,9 +254,23 @@ CAT10_COLS = {
     "OW/RT": "L", "AltGenTariff": "P", "AltGenRule": "Q",
     "SingleOpenJaw": "AI", "DoubleOpenJaw": "AK",
     "CircleTripPermitted": "AM", "EndOnEndPermitted": "AP",
+    # Table 103 ("Circle Trip 2+ Application Tags") has its OWN "Permitted"
+    # column at AN -- confirmed by reading the real template directly
+    # (row 97/98: AM97="102 - Circle Trip 2...", AN97="103 - Circle Trip
+    # 2+...", each with their own "Permitted" sub-header at AM98/AN98).
+    # This was genuinely never wired up (not a formatting bug -- CAT10_COLS
+    # simply had no entry for it). There's only ONE "Circle Trips" sub-row
+    # in the source Fare Rules (no separate "2" vs "2+" condition exists),
+    # so table 103 mirrors whatever table 102 (CircleTripPermitted)
+    # resolved -- see the mirroring step in _write_pipeline_output_to_sheet()
+    # (SIMPLE_CATEGORIES_PART1 loop) rather than a second independent
+    # extraction. Confirmed against a real user-provided example where both
+    # columns held the identical value.
+    "CircleTrip2PlusPermitted": "AN",
     # Not APL/EFF/DISC (M-O), the three RI/Table/CAT/I-O/DI groups (S-AG),
-    # Origin/Destination (AJ), and the OW-Fare-Allowed columns (AL/AO) have
-    # no DataMapping yet -- intentionally not written.
+    # Origin/Destination (AJ), and the OW-Fare-Allowed columns (AL/AO) still
+    # have no DataMapping at all -- intentionally not written (no known
+    # source cell, unlike table 103's Permitted column above).
 }
 CAT10_START_ROW = 99
 
@@ -754,6 +768,23 @@ def _write_pipeline_output_to_sheet(ws, pipeline_output, anchor_rows):
         if needs_table_default:
             for row in rows:
                 row.setdefault("Table", "NEW")
+        if cat_name == "CAT10":
+            # Table 103 mirrors table 102 -- see the CAT10_COLS comment
+            # above for why. Done here (write time), not in the resolver,
+            # so it applies uniformly to both the main sheet and the POO
+            # sheet's independently-resolved CircleTripPermitted value,
+            # and never touches CAT10's AI schema (output_fields) at all.
+            for row in rows:
+                row.setdefault("CircleTrip2PlusPermitted", row.get("CircleTripPermitted"))
+                # The mirrored cell needs the SAME "needs review" highlight
+                # as its source when that source was AI-derived -- found by
+                # testing, not assumed: without this, table 103 silently
+                # shows an AI-derived value with no visual flag at all,
+                # which reads as MORE certain than table 102's identical,
+                # correctly-highlighted value right next to it.
+                ai_fields = row.get("ai_fields")
+                if ai_fields and "CircleTripPermitted" in ai_fields:
+                    ai_fields.add("CircleTrip2PlusPermitted")
         start = start_row + cumulative_offset
         cumulative_offset += _ensure_capacity(ws, start, len(rows))
         _write_block(ws, rows, cols, start)
