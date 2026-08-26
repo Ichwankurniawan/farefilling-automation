@@ -46,11 +46,12 @@ _jobs = {}
 _jobs_lock = threading.Lock()
 _queue = queue.Queue()
 
-STATUS_ORDER = ["queued", "matching", "resolving", "writing", "done", "error"]
+STATUS_ORDER = ["queued", "matching", "loading", "resolving", "writing", "done", "error"]
 
 STATUS_LABEL = {
     "queued": "Queued",
     "matching": "Matching files to fare rules",
+    "loading": "Reading pricebook data from the matched file(s)",
     "resolving": "Resolving fare categories (this can take a few minutes if AI is needed)",
     "writing": "Writing the completed filing",
     "done": "Done",
@@ -130,6 +131,14 @@ def _run_job(job_id):
             _fail(job_id, f"Could not match files to Rule & Tariff: {e}")
             return
         run_logger.log(f"Matched files: {[f['rule'] for f in matched]}")
+
+        # Real gap found via a real stuck job: this loading step used to
+        # run entirely under the "matching" label, which was misleading
+        # even on a healthy run (matching itself is done by this point --
+        # see xlsm_loader.py's _sheet_to_rows() fix for the actual
+        # performance bug that made one real file's load take 5+ minutes
+        # instead of ~7s, with zero progress visible the whole time).
+        _set_status(job_id, "loading", "Reading pricebook data from the matched file(s)...")
 
         anchor_rows = []
         pricebook_lookup = {}
