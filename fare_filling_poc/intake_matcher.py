@@ -46,13 +46,30 @@ MAX_COLS = 15
 
 RULE_GROUP_RE = re.compile(r'([A-Za-z0-9]+)\s*\(\s*([^)]+?)\s*\)')
 
+# Confirmed on a real file: a broken cross-sheet formula (e.g. one
+# CAT04-FlightApplication tab referencing a since-moved/deleted cell in
+# another sheet) reads back as the literal cached string "#REF!" under
+# data_only=True -- not a "None"/blank, and it happens to satisfy the
+# old short-no-spaces check, so it was being treated as a second,
+# genuinely-different candidate RULE value and tripping the "found
+# multiple DIFFERENT internal RULE values" safety check. That's the
+# code working as designed (never guess between two real disagreements)
+# but this isn't a real disagreement -- an Excel error token is never a
+# legitimate RULE code under any circumstance, so it should never even
+# become a candidate in the first place. Every standard Excel error
+# string, not just the one seen so far.
+EXCEL_ERROR_VALUES = {"#REF!", "#DIV/0!", "#N/A", "#NAME?", "#NULL!", "#NUM!", "#VALUE!", "#GETTING_DATA"}
+
 
 def _looks_like_rule_code(value):
     """A plausible RULE code: short, no internal spaces, not a label
-    fragment like "Distribution :" (which would fail on the space)."""
+    fragment like "Distribution :" (which would fail on the space), and
+    not a broken formula's cached Excel error value."""
     if value is None:
         return False
     s = str(value).strip()
+    if s.upper() in EXCEL_ERROR_VALUES:
+        return False
     return bool(s) and " " not in s and 2 <= len(s) <= 10
 
 
