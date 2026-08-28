@@ -61,7 +61,7 @@ PROJECT_ROOT = os.path.dirname(BASE_DIR)
 sys.path.insert(0, BASE_DIR)
 
 import run_logger
-from intake_matcher import match_files_to_rules
+from intake_matcher import match_files_to_rules, normalize_rule_and_tariffs
 
 TEMPLATE_PATH = os.path.join(PROJECT_ROOT, "template", "SQ Fare Filling Template.xlsx")
 
@@ -72,21 +72,25 @@ def _parse_rule_tariff(spec):
     """
     Parses "RULE(TARIFF1,TARIFF2)" -> (rule, [tariff1, tariff2]).
 
-    RULE/TARIFF are uppercased here to match intake_matcher.py's
-    --rule-tariff-text path (used by the web form) -- without this, the
-    two entry points could disagree on RULE/TARIFF casing for what's
-    otherwise the identical spec, which isn't just a display
-    inconsistency: pipeline.py groups/matches anchor rows by these exact
-    strings, so "hkf1" and "HKF1" would silently behave as two different
-    RULEs.
+    The actual RULE/TARIFF normalization (uppercase, strip) routes
+    through intake_matcher.py's normalize_rule_and_tariffs() -- the same
+    function the web form's --rule-tariff-text path uses -- rather than
+    a separate copy here. This used to be its own independent copy of
+    the same logic, and that duplication already caused a real bug once:
+    only intake_matcher.py's copy uppercased RULE/TARIFF for a while, so
+    this CLI path and the web form could silently disagree on casing for
+    what's otherwise the identical spec -- not just a display
+    inconsistency, pipeline.py groups/matches anchor rows by these exact
+    strings, so "hkf1" vs "HKF1" would behave as two different RULEs.
+    Only the regex match itself (spec shape validation, CLI-specific
+    error messages) stays local to this file.
     """
     m = RULE_TARIFF_RE.match(spec)
     if not m:
         raise argparse.ArgumentTypeError(
             f'--rule-tariff {spec!r} must look like "RULE(TARIFF1,TARIFF2)"'
         )
-    rule = m.group(1).upper()
-    tariffs = [t.strip().upper() for t in m.group(2).split(",") if t.strip()]
+    rule, tariffs = normalize_rule_and_tariffs(m.group(1), m.group(2))
     if not tariffs:
         raise argparse.ArgumentTypeError(f"--rule-tariff {spec!r} has no TARIFF codes")
     return rule, tariffs

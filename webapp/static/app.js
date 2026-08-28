@@ -18,6 +18,13 @@ const ruleTariffHint = document.getElementById("rule-tariff-hint");
 const fileWarning = document.getElementById("file-warning");
 
 const ALLOWED_EXTENSIONS = [".xlsm", ".xlsx"];
+// Mirrors fare_filling_poc/intake_matcher.py's RULE_GROUP_RE -- can't
+// literally share the pattern across Python/JS without a build step
+// this project doesn't have, so keep this in sync by hand if that one
+// ever changes. Lower stakes than the Python-side duplication that used
+// to exist (see intake_matcher.py's normalize_rule_and_tariffs()): this
+// copy is ONLY used for a non-blocking format hint, never for the real
+// RULE/TARIFF value the server actually trusts.
 const RULE_GROUP_RE = /([A-Za-z0-9]+)\s*\(\s*([^)]+?)\s*\)/g;
 
 let selectedFiles = [];

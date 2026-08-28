@@ -2,10 +2,13 @@
 #
 # Scoped deliberately narrow for now: catches import/syntax breakage and
 # the exact regression classes already found once by hand -- the
-# HTML/JS id-mismatch pattern (webapp-static-consistency), and the
+# HTML/JS id-mismatch pattern (webapp-static-consistency), the
 # "required on a hidden <input> silently blocks submit" browser bug
 # (webapp-smoke-test, ci/browser_smoke_test.py) that a real user actually
-# hit before it was fixed.
+# hit before it was fixed, and the pytest suite under tests/ (unit-tests)
+# covering the specific real-file bugs documented in CLAUDE.md section 7
+# (Excel error values, phantom used-range, RULE&TARIFF normalization,
+# per-cell AI highlighting, rate limiting, queue position).
 #
 # Deliberately does NOT exercise the real AI-fallback pipeline against
 # real pricebook files: a shared CI runner has no route to the
@@ -65,6 +68,18 @@ webapp-static-consistency:
       assert not missing, f'app.js references ids missing from index.html: {missing}'
       print(f'HTML/JS id references consistent ({len(refs)} refs checked)')
       "
+
+unit-tests:
+  stage: test
+  cache:
+    key: pip-$CI_COMMIT_REF_SLUG
+    paths: [.cache/pip]
+  script:
+    - python -m venv .venv
+    - .venv/bin/pip install --upgrade pip -q
+    - .venv/bin/pip install -r fare_filling_poc/requirements.txt -q
+    - .venv/bin/pip install pytest -q
+    - .venv/bin/python -m pytest tests/ -v
 
 webapp-smoke-test:
   stage: test

@@ -120,6 +120,28 @@ def detect_rule_from_file(path):
     return found[0][3]
 
 
+def normalize_rule_and_tariffs(rule_raw, tariffs_raw):
+    """
+    Single source of truth for turning a matched "RULE(TARIFF1,TARIFF2)"
+    group into (rule, [tariffs]) -- both uppercased and stripped.
+
+    This used to be duplicated (copy-pasted, not shared) between this
+    function and run_new_filing.py's explicit --rule-tariff CLI parsing.
+    That duplication already caused a real bug once: only THIS copy
+    uppercased RULE/TARIFF for a while, so the web form's
+    --rule-tariff-text path and the CLI's --rule-tariff path could
+    silently disagree on casing for what's otherwise the identical spec
+    -- not just a display difference, pipeline.py groups/matches anchor
+    rows by these exact strings, so "hkf1" vs "HKF1" could behave as two
+    different RULEs depending on which entry point was used. Routing
+    both through this one function is what makes that class of bug
+    structurally impossible to reintroduce, not just fixed once.
+    """
+    rule = rule_raw.strip().upper()
+    tariffs = [t.strip().upper() for t in tariffs_raw.split(",") if t.strip()]
+    return rule, tariffs
+
+
 def _parse_rule_tariff_text(text):
     """
     Parses the form's free-text field into {RULE: [TARIFF, ...]}.
@@ -132,13 +154,7 @@ def _parse_rule_tariff_text(text):
     """
     specs = {}
     for m in RULE_GROUP_RE.finditer(text):
-        rule = m.group(1).strip().upper()
-        # TARIFF is uppercased too, same as RULE -- both are fare-filing
-        # codes, not free text, and every downstream consumer (including
-        # run_new_filing.py's --rule-tariff CLI path) needs to agree on
-        # the same casing or "hkf1"/"HKF1" would silently behave as two
-        # different RULEs when grouped internally.
-        tariffs = [t.strip().upper() for t in m.group(2).split(",") if t.strip()]
+        rule, tariffs = normalize_rule_and_tariffs(m.group(1), m.group(2))
         if not tariffs:
             continue
         specs[rule] = tariffs

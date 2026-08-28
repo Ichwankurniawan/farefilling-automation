@@ -364,6 +364,34 @@ fare_filling_poc/
 `-- test_type3.py               # Type 3 end-to-end (main + POO, two output sheets)
 ```
 
+**A real `tests/` pytest suite now exists too, at the project root** (sibling
+to `fare_filling_poc/` and `webapp/`, not inside either) -- unrelated to
+the broken `test_from_real_files.py`/`test_type2.py`/`test_type3.py`
+above (those stay real-file end-to-end tests, whenever their fixtures get
+regenerated; `tests/` is fast, synthetic-data unit tests, run in CI on
+every push via `.gitlab-ci.yml`'s `unit-tests` job):
+
+```
+tests/
+|-- conftest.py             # sys.path setup -- same pattern every real entry
+|                          # point already uses, no installed package exists
+|-- test_template_writer.py # _parse_date_value(), _normalize_output_value()
+|                          # (bug #25)
+|-- test_intake_matcher.py  # _looks_like_rule_code() (bug #28),
+|                          # normalize_rule_and_tariffs(), _parse_rule_tariff_text()
+|-- test_category_base.py   # _copy_ai_fields() (section 12's per-cell highlighting)
+|-- test_ratelimit.py       # webapp/ratelimit.py's exact boundary
+|-- test_jobs_queue.py      # webapp/jobs.py's get_queue_position()
+`-- test_xlsm_loader.py     # _normalize_cat_number(), _sheet_to_rows()'s
+                           # blank-row early-exit (bug #29)
+```
+
+Run locally with `fare_filling_poc/.venv/Scripts/python.exe -m pytest tests/ -v`
+from the project root (pytest itself is deliberately not added to
+`fare_filling_poc/requirements.txt` -- installed inline in CI, same as
+`playwright` for the smoke test, to keep the production dependency list
+free of test-only tooling).
+
 Sibling directories, each with their own generator script producing the
 XLSM inputs the test scripts above read:
 - `input_files/` (Type 1) -- `build_pricebooks.py` -> `V1-ABC1 Type1.xlsm`, `V1-ABC2 Type1.xlsm`
