@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from typing import List
 
-from webapp import audit, jobs
+from webapp import audit, jobs, ratelimit
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -64,6 +64,18 @@ async def create_job(
     rule_tariff_text: str = Form(...),
     files: List[UploadFile] = File(...),
 ):
+    # Checked first, before any file I/O -- rejecting an over-limit
+    # client should cost as little work as possible.
+    client_ip = request.client.host if request.client else "unknown"
+    retry_after = ratelimit.check_and_record(client_ip)
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many submissions from this connection -- please wait about "
+                    f"{retry_after // 60 or 1} minute(s) before submitting again.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     wo_id = wo_id.strip()
     rule_tariff_text = rule_tariff_text.strip()
 
@@ -132,7 +144,6 @@ async def create_job(
     jobs._persist(job_id)
     jobs._queue.put(job_id)
 
-    client_ip = request.client.host if request.client else "unknown"
     audit.log_submission(job_id, wo_id, sheet_type, client_ip, [name for name, _path in saved])
 
     return {"job_id": job_id}

@@ -987,8 +987,27 @@ this exact class of bug can't silently return.
 - **No authentication.** Deliberate choice for this internal-only
   version (per explicit decision when the form was scoped). Revisit if
   usage moves beyond a small trusted group.
-- **No rate limiting.** With no auth either, nothing stops rapid-fire
-  submissions from starving the single-worker queue for everyone else.
+
+**Submissions are now rate-limited per IP** (`webapp/ratelimit.py`, new
+-- `POST /api/jobs` only; `GET /api/jobs/{id}` is deliberately NOT
+throttled, since the frontend legitimately polls that every 2s per
+active job). With no authentication still in place, this was the one
+thing standing between an accidental (a stuck retry loop) or deliberate
+burst of submissions and it monopolizing the single-worker queue for
+everyone else -- the queue's single-worker design (see webapp/jobs.py)
+means one client's burst doesn't just cost that client time, it pushes
+every other real submission behind all of it, for as long as each of
+those jobs takes to run (minutes, not milliseconds). Plain in-memory
+sliding window, not a library -- 5 submissions per 10-minute window per
+IP, generous headroom above real usage (~35 WOs/month overall, roughly
+1-2/day) while still bounding a runaway client to a small head start
+rather than an unbounded one. Deliberately not persisted -- pacing
+within one running process's lifetime, not something that needs to
+survive a restart. Verified two ways: a direct unit test of the exact
+boundary (5 allowed, 6th+ blocked, a different IP unaffected), and a
+real end-to-end test through the live server -- 6 rapid submissions,
+the first 5 returned real job ids (HTTP 200), the 6th was rejected with
+HTTP 429 and a clear "please wait ~10 minutes" message.
 
 **A submission is now recorded in an audit trail** (`webapp/audit.py`,
 `webapp/audit.log`, gitignored -- real submission data, same reasoning
