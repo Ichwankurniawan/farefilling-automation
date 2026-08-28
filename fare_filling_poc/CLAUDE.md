@@ -990,6 +990,37 @@ this exact class of bug can't silently return.
 - **No rate limiting.** With no auth either, nothing stops rapid-fire
   submissions from starving the single-worker queue for everyone else.
 
+**A submission is now recorded in an audit trail** (`webapp/audit.py`,
+`webapp/audit.log`, gitignored -- real submission data, same reasoning
+as `webapp/uploads/`/`outputs/`). One append-only line per accepted
+submission: timestamp, job id, WO ID, sheet type, requesting IP, and
+filenames -- written the moment a job is accepted, before the worker
+picks it up, so the record exists even if the job later fails or the
+server restarts mid-run. Deliberately a plain text file, not a database
+or structured logging -- matches `run_logger.py`'s existing style rather
+than adding a dependency for a currently low-volume tool. This doesn't
+answer "who" beyond an IP address, since there's still no authentication
+(see the item above) -- it closes the "we have no record of any of
+this" gap, not the identity gap.
+
+**A queued job now shows its real position in line**, not just
+"Queued" with no context. `webapp/jobs.py` tracks `_queue_order` (a
+plain list mirroring the real dispatch queue's FIFO order, since
+`queue.Queue` itself can't be peeked into) and `_current_running_job_id`
+alongside the existing job state, both updated under the same
+`_jobs_lock`, both deliberately NOT persisted (live queue depth, not job
+identity -- correctly starts empty after a restart, same as the worker
+thread itself does). `get_queue_position()` returns `None` once a job
+leaves "queued" (position stops being the relevant signal -- the
+browser already has richer progress via status/log_lines by then), so
+`server.py` folds it straight into `status_label` itself ("Queued -- 2
+jobs ahead of you") rather than a separate field the frontend would
+need new code to display -- no `app.js` changes needed, same pattern as
+the earlier `"loading"` status addition. Verified with two real jobs
+submitted back-to-back: the second stayed at `queue_position=1` for the
+entire time the first was actually running, then flipped to `null` the
+instant the first finished and the second started.
+
 **Job state now survives a restart** (previously the top limitation
 here -- fixed, not just documented as accepted). `webapp/jobs.py`
 persists every status change to `webapp/uploads/<job_id>/state.json`

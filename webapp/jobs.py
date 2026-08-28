@@ -47,6 +47,19 @@ _jobs = {}
 _jobs_lock = threading.Lock()
 _queue = queue.Queue()
 
+# Separate from `_queue` (a plain queue.Queue, which the worker thread
+# blocks on via .get() -- fine for dispatch, but Queue doesn't support
+# peeking at what's waiting or where a specific job_id sits in line).
+# _queue_order tracks the same FIFO ordering in a form that CAN answer
+# "how many jobs are ahead of this one" for the status API, without
+# duplicating or racing against the real dispatch queue -- both are
+# updated together under _jobs_lock. In-memory only, deliberately not
+# persisted: it's live queue depth, not job identity or results, and
+# naturally (and correctly) starts empty after a restart, same as the
+# worker thread itself does.
+_queue_order = []
+_current_running_job_id = None
+
 STATUS_ORDER = ["queued", "matching", "loading", "resolving", "writing", "done", "error"]
 TERMINAL_STATUSES = {"done", "error"}
 STATE_FILENAME = "state.json"
@@ -91,6 +104,7 @@ def submit_job(wo_id, sheet_type, rule_tariff_text, upload_tmp_paths):
     job = _new_job_record(job_id, wo_id, sheet_type, rule_tariff_text, upload_tmp_paths)
     with _jobs_lock:
         _jobs[job_id] = job
+        _queue_order.append(job_id)
     _persist(job_id)
     _queue.put(job_id)
     return job_id
@@ -100,6 +114,29 @@ def get_job(job_id):
     with _jobs_lock:
         job = _jobs.get(job_id)
         return dict(job) if job else None
+
+
+def get_queue_position(job_id):
+    """
+    Returns how many jobs are genuinely ahead of this one before the
+    single worker gets to it: None if the job isn't in "queued" status
+    (the position only means something while it's waiting -- once it
+    starts, the browser already sees richer progress via status/log_lines),
+    otherwise a 0-based count of {the job currently running, if any} +
+    {queued jobs ahead of it in _queue_order}.
+    """
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None or job["status"] != "queued":
+            return None
+        ahead = 1 if _current_running_job_id is not None else 0
+        try:
+            ahead += _queue_order.index(job_id)
+        except ValueError:
+            # Already picked up between the status check above and here
+            # -- not meaningfully "queued" anymore, treat as next in line.
+            pass
+        return ahead
 
 
 def _state_path(job_id):
@@ -320,13 +357,20 @@ def _fail(job_id, message):
 
 
 def _worker_loop():
+    global _current_running_job_id
     while True:
         job_id = _queue.get()
+        with _jobs_lock:
+            _current_running_job_id = job_id
+            if job_id in _queue_order:
+                _queue_order.remove(job_id)
         try:
             _run_job(job_id)
         except Exception as e:
             _fail(job_id, f"Unhandled worker error: {e}")
         finally:
+            with _jobs_lock:
+                _current_running_job_id = None
             _queue.task_done()
 
 

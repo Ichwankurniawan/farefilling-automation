@@ -16,12 +16,12 @@ Run:
 import os
 import re
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from typing import List
 
-from webapp import jobs
+from webapp import audit, jobs
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
@@ -58,6 +58,7 @@ def health():
 
 @app.post("/api/jobs")
 async def create_job(
+    request: Request,
     wo_id: str = Form(...),
     sheet_type: int = Form(...),
     rule_tariff_text: str = Form(...),
@@ -127,8 +128,12 @@ async def create_job(
     with jobs._jobs_lock:
         job = jobs._new_job_record(job_id, wo_id, sheet_type, rule_tariff_text, saved)
         jobs._jobs[job_id] = job
+        jobs._queue_order.append(job_id)
     jobs._persist(job_id)
     jobs._queue.put(job_id)
+
+    client_ip = request.client.host if request.client else "unknown"
+    audit.log_submission(job_id, wo_id, sheet_type, client_ip, [name for name, _path in saved])
 
     return {"job_id": job_id}
 
@@ -138,14 +143,22 @@ def job_status(job_id: str):
     job = jobs.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Unknown job id.")
+    queue_position = jobs.get_queue_position(job_id)
+    status_label = job["status_label"]
+    if queue_position is not None:
+        status_label += (
+            " -- starting shortly" if queue_position == 0
+            else f" -- {queue_position} job{'s' if queue_position != 1 else ''} ahead of you"
+        )
     return JSONResponse({
         "id": job["id"],
         "status": job["status"],
-        "status_label": job["status_label"],
+        "status_label": status_label,
         "message": job["message"],
         "error": job["error"],
         "log_lines": job["log_lines"][-20:],
         "download_ready": job["status"] == "done",
+        "queue_position": queue_position,
     })
 
 
