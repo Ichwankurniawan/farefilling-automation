@@ -230,6 +230,65 @@ def _set_status(job_id, status, message=None):
     _persist(job_id)
 
 
+def _load_pricebook(path, rule, sheet_type):
+    """
+    The one place that maps sheet_type -> which xlsm_loader function reads
+    a matched file. Kept as three real branches (not collapsed further)
+    because Type 1 and Type 2/3 return genuinely different pricebook
+    shapes (PricebookData vs PricebookDataType2 -- see CLAUDE.md section
+    10/11), and Type 2 vs Type 3 read different real sheet layouts even
+    though they share a return type.
+    """
+    if sheet_type == 1:
+        from xlsm_loader import load_pricebook_from_xlsm
+        return load_pricebook_from_xlsm(path, rule)
+    elif sheet_type == 2:
+        from xlsm_loader import load_pricebook_type2
+        return load_pricebook_type2(path, rule)
+    else:
+        from xlsm_loader import load_pricebook_type3
+        return load_pricebook_type3(path, rule)
+
+
+def _resolve_and_write(job_id, sheet_type, anchor_rows, pricebook_lookup, wo_id, output_path):
+    """
+    Type 1 resolves and writes a single sheet. Type 2 and 3 share the same
+    Yes/No/NA + Fare Rule(POO) mechanism end to end (CLAUDE.md section
+    10/11 -- xlsm_loader.py already converts Type 3 into the exact shape
+    Type 2's resolvers expect), so this is a genuine two-way split, not
+    three separate branches like _load_pricebook() above.
+    """
+    if sheet_type == 1:
+        from pipeline import run_pipeline
+        from template_writer import write_to_template
+
+        output = run_pipeline(anchor_rows, pricebook_lookup)
+
+        _set_status(job_id, "writing", "Writing the completed filing into the template...")
+        write_to_template(
+            template_path=TEMPLATE_PATH,
+            pipeline_output=output,
+            anchor_rows=anchor_rows,
+            output_path=output_path,
+            wo_id=wo_id,
+        )
+    else:
+        from pipeline import run_pipeline_type2_3
+        from template_writer import write_to_template_type2
+
+        output_main, output_poo = run_pipeline_type2_3(anchor_rows, pricebook_lookup)
+
+        _set_status(job_id, "writing", "Writing the completed filing into the template...")
+        write_to_template_type2(
+            template_path=TEMPLATE_PATH,
+            output_main=output_main,
+            output_poo=output_poo,
+            anchor_rows=anchor_rows,
+            output_path=output_path,
+            wo_id=wo_id,
+        )
+
+
 def _run_job(job_id):
     job = get_job(job_id)
     wo_id = job["wo_id"]
@@ -266,15 +325,7 @@ def _run_job(job_id):
         for f in matched:
             rule = f["rule"]
             pricebook_name = os.path.splitext(os.path.basename(f["path"]))[0]
-            if sheet_type == 1:
-                from xlsm_loader import load_pricebook_from_xlsm
-                pricebook_lookup[rule] = load_pricebook_from_xlsm(f["path"], rule)
-            elif sheet_type == 2:
-                from xlsm_loader import load_pricebook_type2
-                pricebook_lookup[rule] = load_pricebook_type2(f["path"], rule)
-            else:
-                from xlsm_loader import load_pricebook_type3
-                pricebook_lookup[rule] = load_pricebook_type3(f["path"], rule)
+            pricebook_lookup[rule] = _load_pricebook(f["path"], rule, sheet_type)
             for tariff in f["tariffs"]:
                 anchor_rows.append({
                     "RULE": rule, "TARIFF": tariff,
@@ -285,35 +336,7 @@ def _run_job(job_id):
 
         output_path = os.path.join(OUTPUT_DIR, f"SQ Fare Filing_{wo_id}_Type{sheet_type}_{job_id}.xlsx")
 
-        if sheet_type == 1:
-            from pipeline import run_pipeline
-            from template_writer import write_to_template
-
-            output = run_pipeline(anchor_rows, pricebook_lookup)
-
-            _set_status(job_id, "writing", "Writing the completed filing into the template...")
-            write_to_template(
-                template_path=TEMPLATE_PATH,
-                pipeline_output=output,
-                anchor_rows=anchor_rows,
-                output_path=output_path,
-                wo_id=wo_id,
-            )
-        else:
-            from pipeline import run_pipeline_type2_3
-            from template_writer import write_to_template_type2
-
-            output_main, output_poo = run_pipeline_type2_3(anchor_rows, pricebook_lookup)
-
-            _set_status(job_id, "writing", "Writing the completed filing into the template...")
-            write_to_template_type2(
-                template_path=TEMPLATE_PATH,
-                output_main=output_main,
-                output_poo=output_poo,
-                anchor_rows=anchor_rows,
-                output_path=output_path,
-                wo_id=wo_id,
-            )
+        _resolve_and_write(job_id, sheet_type, anchor_rows, pricebook_lookup, wo_id, output_path)
 
         run_logger.log(f"Done. Wrote {output_path}")
         run_logger.log_summary()
