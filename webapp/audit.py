@@ -18,11 +18,18 @@ requirements grow past what grep/a text editor can answer.
 """
 import os
 import time
+from typing import Iterable
 
 AUDIT_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audit.log")
 
 
-def log_submission(job_id, wo_id, sheet_type, client_ip, filenames):
+def log_submission(
+    job_id: str,
+    wo_id: str,
+    sheet_type: int,
+    client_ip: str,
+    filenames: Iterable[str],
+) -> None:
     """
     One line per submission, written the moment a job is accepted (after
     validation passes, before the worker picks it up) -- so the record

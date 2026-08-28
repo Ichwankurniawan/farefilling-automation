@@ -31,10 +31,10 @@ MAX_SUBMISSIONS = 5
 WINDOW_SECONDS = 10 * 60
 
 _lock = threading.Lock()
-_submissions_by_ip = {}  # ip -> [timestamp, ...], pruned lazily on each check
+_submissions_by_ip: dict[str, list[float]] = {}  # ip -> [timestamp, ...], pruned lazily on each check
 
 
-def check_and_record(client_ip):
+def check_and_record(client_ip: str) -> int | None:
     """
     Returns None if this submission is allowed (and records it towards
     the window), or a (retry_after_seconds) int if the client is over

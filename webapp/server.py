@@ -47,12 +47,12 @@ app = FastAPI(title="Fare Filing Automation")
 
 
 @app.get("/")
-def index():
+def index() -> FileResponse:
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))
 
 
 @app.get("/api/health")
-def health():
+def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
@@ -63,7 +63,7 @@ async def create_job(
     sheet_type: int = Form(...),
     rule_tariff_text: str = Form(...),
     files: List[UploadFile] = File(...),
-):
+) -> dict[str, str]:
     # Checked first, before any file I/O -- rejecting an over-limit
     # client should cost as little work as possible.
     client_ip = request.client.host if request.client else "unknown"
@@ -106,7 +106,7 @@ async def create_job(
     job_dir = os.path.join(jobs.UPLOAD_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
 
-    saved = []
+    saved: list[tuple[str, str]] = []
     try:
         for f in files:
             name = os.path.basename(f.filename or "upload.xlsm")
@@ -150,7 +150,7 @@ async def create_job(
 
 
 @app.get("/api/jobs/{job_id}")
-def job_status(job_id: str):
+def job_status(job_id: str) -> JSONResponse:
     job = jobs.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Unknown job id.")
@@ -174,7 +174,7 @@ def job_status(job_id: str):
 
 
 @app.get("/api/jobs/{job_id}/download")
-def job_download(job_id: str):
+def job_download(job_id: str) -> FileResponse:
     job = jobs.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Unknown job id.")

@@ -25,6 +25,14 @@ import threading
 import time
 import traceback
 import uuid
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Only for static type checkers -- the real imports stay lazy (inside
+    # _load_pricebook()) so importing this module at server startup
+    # doesn't also pull in the full pipeline/openpyxl stack.
+    from pricebook_data import PricebookData
+    from pricebook_data_type2 import PricebookDataType2
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BACKEND_DIR = os.path.join(os.path.dirname(BASE_DIR), "fare_filling_poc")
@@ -43,9 +51,9 @@ RULE_TARIFF_GROUP_RE = re.compile(r"([A-Za-z0-9]+)\s*\(\s*([^)]+?)\s*\)")
 # job_id -> job dict. Fine as a plain dict for a single-process internal
 # tool; each job is only ever touched by the worker thread (while
 # running) or read-only by request handlers (via .copy()).
-_jobs = {}
+_jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
-_queue = queue.Queue()
+_queue: "queue.Queue[str]" = queue.Queue()
 
 # Separate from `_queue` (a plain queue.Queue, which the worker thread
 # blocks on via .get() -- fine for dispatch, but Queue doesn't support
@@ -57,8 +65,8 @@ _queue = queue.Queue()
 # persisted: it's live queue depth, not job identity or results, and
 # naturally (and correctly) starts empty after a restart, same as the
 # worker thread itself does.
-_queue_order = []
-_current_running_job_id = None
+_queue_order: list[str] = []
+_current_running_job_id: str | None = None
 
 STATUS_ORDER = ["queued", "matching", "loading", "resolving", "writing", "done", "error"]
 TERMINAL_STATUSES = {"done", "error"}
@@ -75,7 +83,13 @@ STATUS_LABEL = {
 }
 
 
-def _new_job_record(job_id, wo_id, sheet_type, rule_tariff_text, saved_files):
+def _new_job_record(
+    job_id: str,
+    wo_id: str,
+    sheet_type: int,
+    rule_tariff_text: str,
+    saved_files: list[tuple[str, str]],
+) -> dict[str, Any]:
     return {
         "id": job_id,
         "wo_id": wo_id,
@@ -94,7 +108,12 @@ def _new_job_record(job_id, wo_id, sheet_type, rule_tariff_text, saved_files):
     }
 
 
-def submit_job(wo_id, sheet_type, rule_tariff_text, upload_tmp_paths):
+def submit_job(
+    wo_id: str,
+    sheet_type: int,
+    rule_tariff_text: str,
+    upload_tmp_paths: list[tuple[str, str]],
+) -> str:
     """
     upload_tmp_paths: list of (original_filename, saved_path) already
     written to disk by the request handler (under a job-specific folder).
@@ -110,13 +129,13 @@ def submit_job(wo_id, sheet_type, rule_tariff_text, upload_tmp_paths):
     return job_id
 
 
-def get_job(job_id):
+def get_job(job_id: str) -> dict[str, Any] | None:
     with _jobs_lock:
         job = _jobs.get(job_id)
         return dict(job) if job else None
 
 
-def get_queue_position(job_id):
+def get_queue_position(job_id: str) -> int | None:
     """
     Returns how many jobs are genuinely ahead of this one before the
     single worker gets to it: None if the job isn't in "queued" status
@@ -139,11 +158,11 @@ def get_queue_position(job_id):
         return ahead
 
 
-def _state_path(job_id):
+def _state_path(job_id: str) -> str:
     return os.path.join(UPLOAD_DIR, job_id, STATE_FILENAME)
 
 
-def _persist(job_id):
+def _persist(job_id: str) -> None:
     """
     Writes the job's current state to disk -- job history previously
     vanished entirely on a restart (a real gap hit twice in this
@@ -170,7 +189,7 @@ def _persist(job_id):
         pass
 
 
-def _load_jobs_from_disk():
+def _load_jobs_from_disk() -> None:
     """
     Called once at import time (server startup) -- restores job history
     across a restart instead of starting with a blank slate every time.
@@ -218,7 +237,7 @@ def _load_jobs_from_disk():
         print(f"[jobs] Restored {restored} job(s) from disk ({interrupted} marked interrupted by restart)", flush=True)
 
 
-def _set_status(job_id, status, message=None):
+def _set_status(job_id: str, status: str, message: str | None = None) -> None:
     with _jobs_lock:
         job = _jobs[job_id]
         job["status"] = status
@@ -230,7 +249,7 @@ def _set_status(job_id, status, message=None):
     _persist(job_id)
 
 
-def _load_pricebook(path, rule, sheet_type):
+def _load_pricebook(path: str, rule: str, sheet_type: int) -> "PricebookData | PricebookDataType2":
     """
     The one place that maps sheet_type -> which xlsm_loader function reads
     a matched file. Kept as three real branches (not collapsed further)
@@ -250,7 +269,14 @@ def _load_pricebook(path, rule, sheet_type):
         return load_pricebook_type3(path, rule)
 
 
-def _resolve_and_write(job_id, sheet_type, anchor_rows, pricebook_lookup, wo_id, output_path):
+def _resolve_and_write(
+    job_id: str,
+    sheet_type: int,
+    anchor_rows: list[dict[str, Any]],
+    pricebook_lookup: "dict[str, PricebookData | PricebookDataType2]",
+    wo_id: str,
+    output_path: str,
+) -> None:
     """
     Type 1 resolves and writes a single sheet. Type 2 and 3 share the same
     Yes/No/NA + Fare Rule(POO) mechanism end to end (CLAUDE.md section
@@ -289,7 +315,7 @@ def _resolve_and_write(job_id, sheet_type, anchor_rows, pricebook_lookup, wo_id,
         )
 
 
-def _run_job(job_id):
+def _run_job(job_id: str) -> None:
     job = get_job(job_id)
     wo_id = job["wo_id"]
     sheet_type = job["sheet_type"]
@@ -372,14 +398,14 @@ def _run_job(job_id):
         _fail(job_id, friendly)
 
 
-def _fail(job_id, message):
+def _fail(job_id: str, message: str) -> None:
     with _jobs_lock:
         job = _jobs[job_id]
         job["error"] = message
     _set_status(job_id, "error", message)
 
 
-def _worker_loop():
+def _worker_loop() -> None:
     global _current_running_job_id
     while True:
         job_id = _queue.get()
