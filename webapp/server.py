@@ -33,6 +33,16 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 WO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 ALLOWED_EXTENSIONS = (".xlsm", ".xlsx")
 
+# Real pricebook files seen so far run 200KB-1.2MB (confirmed via the
+# actual sample files this project has been tested against) -- 20MB per
+# file gives ~15x headroom over the largest real file while still
+# bounding the worst case, and matches the nginx client_max_body_size
+# already planned in docs/deployment-runbook.md (that layer isn't
+# deployed yet -- this app-level check is the only enforcement that
+# actually exists right now).
+MAX_UPLOAD_SIZE_BYTES = 20 * 1024 * 1024
+UPLOAD_CHUNK_SIZE = 1024 * 1024  # stream in 1MB chunks, never hold a full oversized file in memory
+
 app = FastAPI(title="Fare Filing Automation")
 
 
@@ -77,19 +87,39 @@ async def create_job(
                 detail=f"'{name}' is not a .xlsm/.xlsx file.",
             )
 
+    import shutil
     import uuid
     job_id = uuid.uuid4().hex[:12]
     job_dir = os.path.join(jobs.UPLOAD_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
 
     saved = []
-    for f in files:
-        name = os.path.basename(f.filename or "upload.xlsm")
-        dest = os.path.join(job_dir, name)
-        content = await f.read()
-        with open(dest, "wb") as out:
-            out.write(content)
-        saved.append((name, dest))
+    try:
+        for f in files:
+            name = os.path.basename(f.filename or "upload.xlsm")
+            dest = os.path.join(job_dir, name)
+            written = 0
+            with open(dest, "wb") as out:
+                while True:
+                    chunk = await f.read(UPLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > MAX_UPLOAD_SIZE_BYTES:
+                        # Abort mid-stream -- never finish writing an
+                        # oversized file, never hold more than one chunk
+                        # of it in memory at a time.
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"'{name}' exceeds the {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)}MB upload limit.",
+                        )
+                    out.write(chunk)
+            saved.append((name, dest))
+    except HTTPException:
+        # Don't leave a partial job directory behind from a rejected
+        # oversized upload (or any file after it that never got to run).
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise
 
     # submit_job() mints its own job_id normally; here we already made the
     # upload folder under a chosen id, so build the record directly via
@@ -97,6 +127,7 @@ async def create_job(
     with jobs._jobs_lock:
         job = jobs._new_job_record(job_id, wo_id, sheet_type, rule_tariff_text, saved)
         jobs._jobs[job_id] = job
+    jobs._persist(job_id)
     jobs._queue.put(job_id)
 
     return {"job_id": job_id}

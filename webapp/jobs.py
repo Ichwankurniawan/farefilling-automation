@@ -16,6 +16,7 @@ tool -- a WO's AI-heavy run already takes minutes, so jobs queueing
 briefly behind each other is an acceptable tradeoff, not a real
 bottleneck at expected usage volume.
 """
+import json
 import os
 import queue
 import re
@@ -47,6 +48,8 @@ _jobs_lock = threading.Lock()
 _queue = queue.Queue()
 
 STATUS_ORDER = ["queued", "matching", "loading", "resolving", "writing", "done", "error"]
+TERMINAL_STATUSES = {"done", "error"}
+STATE_FILENAME = "state.json"
 
 STATUS_LABEL = {
     "queued": "Queued",
@@ -88,6 +91,7 @@ def submit_job(wo_id, sheet_type, rule_tariff_text, upload_tmp_paths):
     job = _new_job_record(job_id, wo_id, sheet_type, rule_tariff_text, upload_tmp_paths)
     with _jobs_lock:
         _jobs[job_id] = job
+    _persist(job_id)
     _queue.put(job_id)
     return job_id
 
@@ -96,6 +100,85 @@ def get_job(job_id):
     with _jobs_lock:
         job = _jobs.get(job_id)
         return dict(job) if job else None
+
+
+def _state_path(job_id):
+    return os.path.join(UPLOAD_DIR, job_id, STATE_FILENAME)
+
+
+def _persist(job_id):
+    """
+    Writes the job's current state to disk -- job history previously
+    vanished entirely on a restart (a real gap hit twice in this
+    project's own testing: a restart mid-job left the browser polling a
+    job id that returned 404 forever, no way to tell what happened).
+    Atomic write (temp file + os.replace, which is atomic on both
+    Windows and POSIX within the same filesystem) so a crash exactly
+    mid-write never leaves a corrupt state.json behind. Best-effort: a
+    transient disk error here shouldn't crash a real job over its own
+    resilience layer, so failures are swallowed, not raised.
+    """
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        snapshot = dict(job) if job else None
+    if snapshot is None:
+        return
+    path = _state_path(job_id)
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f)
+        os.replace(tmp_path, path)
+    except OSError:
+        pass
+
+
+def _load_jobs_from_disk():
+    """
+    Called once at import time (server startup) -- restores job history
+    across a restart instead of starting with a blank slate every time.
+
+    A job that was genuinely in-progress (not done/error) when the
+    process stopped can't just resume where it left off -- the thread
+    running it, and everything in its local variables (the
+    partially-built pipeline output, the pricebook objects), is gone.
+    Marking it as a clear, explained failure is the honest option;
+    silently leaving it at e.g. "resolving" forever with no worker
+    actually processing it would be worse than the gap this fixes --
+    indistinguishable from the original stuck-job problem this project
+    already spent real effort diagnosing once (see xlsm_loader.py's
+    _sheet_to_rows() fix and its CLAUDE.md writeup).
+    """
+    if not os.path.isdir(UPLOAD_DIR):
+        return
+    restored = 0
+    interrupted = 0
+    for job_id in os.listdir(UPLOAD_DIR):
+        path = _state_path(job_id)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                job = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if job.get("status") not in TERMINAL_STATUSES:
+            note = "This job was interrupted by a server restart before it finished. Please resubmit."
+            job["status"] = "error"
+            job["status_label"] = STATUS_LABEL["error"]
+            job["error"] = note
+            job["message"] = note
+            job.setdefault("log_lines", []).append(note)
+            interrupted += 1
+        # JSON round-trips job["files"] entries (originally (name, path)
+        # tuples) as plain lists -- restore tuples so every existing
+        # `for (_name, p) in job["files"]` unpack site keeps working
+        # unchanged, whether the job was just created or reloaded.
+        job["files"] = [tuple(entry) for entry in job.get("files", [])]
+        _jobs[job_id] = job
+        restored += 1
+    if restored:
+        print(f"[jobs] Restored {restored} job(s) from disk ({interrupted} marked interrupted by restart)", flush=True)
 
 
 def _set_status(job_id, status, message=None):
@@ -107,6 +190,7 @@ def _set_status(job_id, status, message=None):
             job["message"] = message
             job["log_lines"].append(message)
         job["updated_at"] = time.time()
+    _persist(job_id)
 
 
 def _run_job(job_id):
@@ -245,6 +329,8 @@ def _worker_loop():
         finally:
             _queue.task_done()
 
+
+_load_jobs_from_disk()
 
 _worker_thread = threading.Thread(target=_worker_loop, daemon=True)
 _worker_thread.start()

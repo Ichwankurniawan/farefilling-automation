@@ -980,10 +980,6 @@ this exact class of bug can't silently return.
 
 ### Known limitations (accepted for this version, not oversights)
 
-- **In-memory job state.** A service restart loses in-flight/completed
-  job status -- the output `.xlsx` itself survives on disk in
-  `webapp/outputs/`, just unreachable via its job-ID download link
-  afterward.
 - **No upload/output retention policy yet.** `webapp/uploads/` and
   `webapp/outputs/` grow with every submission, forever. Needs a cleanup
   job before running unattended for real -- see
@@ -991,7 +987,39 @@ this exact class of bug can't silently return.
 - **No authentication.** Deliberate choice for this internal-only
   version (per explicit decision when the form was scoped). Revisit if
   usage moves beyond a small trusted group.
-- **No file-size limit** on uploads.
+- **No rate limiting.** With no auth either, nothing stops rapid-fire
+  submissions from starving the single-worker queue for everyone else.
+
+**Job state now survives a restart** (previously the top limitation
+here -- fixed, not just documented as accepted). `webapp/jobs.py`
+persists every status change to `webapp/uploads/<job_id>/state.json`
+(atomic write: temp file + `os.replace()`, so a crash exactly mid-write
+never leaves a corrupt file) and reloads all of them at startup
+(`_load_jobs_from_disk()`, called once before the worker thread starts).
+A job that was genuinely in-progress (not `done`/`error`) when the
+process stopped can't just resume -- the thread running it, and
+everything in its local variables, is gone -- so it's marked `error`
+with an honest "interrupted by a server restart, please resubmit"
+message instead of either silently vanishing (the old 404-forever
+behavior) or looking like it's still running with no worker actually
+processing it (which would read exactly like the stuck-job problem bug
+#29 already spent real effort diagnosing). Verified with a real crash
+simulation, not just written: submitted two real jobs, let one finish
+normally and force-killed the server while the second was genuinely
+mid-`resolving`, restarted, and confirmed via the live API that the
+finished job's `status="done"` + its download both still work
+correctly, while the interrupted one shows the honest error message --
+never a 404, never stuck.
+
+**Upload size is now capped at 20MB per file** (`webapp/server.py`,
+matching the `nginx client_max_body_size` already planned in the
+deployment runbook -- that layer isn't deployed yet, so this app-level
+check is the only enforcement that currently exists). Streamed in 1MB
+chunks with the running total checked as it goes, so an oversized upload
+is rejected mid-stream -- never fully written to disk, never fully held
+in memory -- and the job's upload directory is cleaned up on rejection
+rather than left as an orphan. Verified with a real 21MB dummy file:
+rejected with a clear message, zero directory created.
 
 ### Running it locally
 
