@@ -40,7 +40,7 @@ import-sanity:
       .venv/bin/python -c "
       import sys, importlib
       sys.path.insert(0, 'fare_filling_poc')
-      for m in ['pipeline', 'xlsm_loader', 'common_fields', 'template_writer',
+      for m in ['pipeline', 'xlsm_loader', 'common_fields', 'template_columns', 'template_writer',
                 'template_schema', 'ai_engine', 'run_logger', 'intake_matcher',
                 'pricebook_data', 'pricebook_data_type2']:
           importlib.import_module(m)

@@ -337,11 +337,21 @@ fare_filling_poc/
 |-- pipeline.py                # CATEGORY_REGISTRY (numeric order). run_pipeline()
 |                              # (Type 1, also used as Type 2/3's main-sheet resolution)
 |                              # and run_pipeline_type2_3() (adds Fare Rule(POO) handling)
-|-- template_writer.py         # writes to the REAL template; COLS_BY_CATEGORY,
-|                              # dynamic row-shifting, style preservation.
-|                              # write_to_template() (Type 1, one sheet) and
-|                              # write_to_template_type2() (Type 2/3, duplicates the
-|                              # sheet for POO output)
+|-- template_columns.py        # WHERE each field lives: every CATxx_COLS dict,
+|                              # CATxx_START_ROW, COLS_BY_CATEGORY -- pure data,
+|                              # read directly from the template, no writing logic.
+|                              # Split out of template_writer.py so "where does a
+|                              # field live" and "how do we write it" can be read
+|                              # and changed independently -- imported wholesale via
+|                              # `from template_columns import *` (__all__-pinned),
+|                              # so `from template_writer import COLS_BY_CATEGORY`
+|                              # (categories/base.py) keeps working unchanged.
+|-- template_writer.py         # HOW we write it: dynamic row-shifting/capacity,
+|                              # style preservation, output value normalization
+|                              # (_normalize_output_value -- bug #25), per-cell AI
+|                              # highlighting. write_to_template() (Type 1, one
+|                              # sheet) and write_to_template_type2() (Type 2/3,
+|                              # duplicates the sheet for POO output)
 |-- template_schema.py         # reads field labels from the real template's own
 |                              # header cells (CATEGORY_HEADER_ROWS)
 |-- ai_engine.py                # generic AI call, one implementation
