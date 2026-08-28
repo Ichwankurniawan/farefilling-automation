@@ -12,6 +12,7 @@ directly -- individual resolvers use it to decide whether GAP-sourced
 fields apply (only for sheet_type == 1, per the temporary design).
 """
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -118,6 +119,67 @@ class CategoryResolver:
 
         bundle = self._bundle(rule_id, sheet_type, branch, [entry])
         alt_gen_rule = row.get("alt_gen_rule")
+        bundle["common_override"] = {
+            "SAME AS BASE REFERENCE FARE ?": row.get("same_as_base"),
+            "AltGenTariff": "IPRG" if alt_gen_rule else None,
+            "AltGenRule": alt_gen_rule,
+            "OW/RT": _lookup_owrt_type23(pricebook_data) if _owrt_type23_applies(self.category, sheet_type) else None,
+        }
+        return bundle
+
+    def _resolve_type2_3_embedded_iprg(self, rule_id, pricebook_data, sheet_type):
+        """
+        Shared by CAT16 and CAT31 -- confirmed byte-for-byte identical
+        real-file behavior for both: the override text points to an
+        unseen "FARE FAMILY FEE CONDITIONS" source with no structured
+        field of its own (both categories have output_fields=[]), but
+        AltGenRule is embedded IN that same override text ("...Please tag
+        IPRG rule <code>") rather than the separate "For HO/TCS: Alt Gen
+        Rule IPRG" column (confirmed blank on real Type 2 samples for
+        both). See each subclass's own _resolve_type2_3() override for
+        the specific confirmed sample text that established this.
+        """
+        row = pricebook_data.get_type2_row(self.category)
+        if row is None:
+            return self._bundle(rule_id, sheet_type, "UNRECOGNIZED",
+                                 [self._flagged_entry(f"No {self.category} row found in Fare Rules "
+                                                       f"(Type {sheet_type})")])
+
+        same_as_base = (row.get("same_as_base") or "").strip().upper()
+        override_text = row.get("override_text") or ""
+
+        if same_as_base in ("YES", "NA", "NOT APPLICABLE", ""):
+            entry = self._blank_entry()
+            branch = "SAME_AS_BASE"
+            alt_gen_rule = row.get("alt_gen_rule")
+        else:
+            iprg_match = re.search(r'IPRG\s+RULE\s+(\S+)', override_text, re.IGNORECASE)
+            alt_gen_rule = iprg_match.group(1) if iprg_match else row.get("alt_gen_rule")
+            entry = self._flagged_entry(
+                f"No structured field for the rebooking-conditions text -- raw text: {override_text!r}")
+            branch = "TYPE2_3_EXTRACTED"
+
+            # AI fallback: text has content, isn't a no-op phrase, but
+            # regex found neither an explicit column value nor an
+            # embedded "IPRG rule <code>" phrase -- try AI once before
+            # leaving AltGenRule blank (output_fields is empty for both
+            # categories, so this only targets AltGenRule specifically,
+            # not the whole entry).
+            if needs_ai_fallback(override_text, alt_gen_rule):
+                ai_result = extract_with_ai(override_text, {"rule_id": rule_id, "category": self.category},
+                                             os.path.join(AI_SPECS_DIR, self.ai_spec_file), ["AltGenRule"])
+                alt_gen_rule = ai_result.get("AltGenRule")
+                entry["ai_used"] = ai_result.get("ai_used", False)
+                # AltGenRule isn't a key of `entry` here (it flows through
+                # common_override below instead) -- mark it directly so
+                # template_writer.py can still highlight its specific cell.
+                if ai_result.get("AltGenRule") is not None:
+                    entry.setdefault("ai_fields", set()).add("AltGenRule")
+                entry["flag_reason"] = (entry["flag_reason"] or "") + \
+                    " | AltGenRule attempted via AI (no regex match found)"
+                branch = "AI_EXTRACTED"
+
+        bundle = self._bundle(rule_id, sheet_type, branch, [entry])
         bundle["common_override"] = {
             "SAME AS BASE REFERENCE FARE ?": row.get("same_as_base"),
             "AltGenTariff": "IPRG" if alt_gen_rule else None,
