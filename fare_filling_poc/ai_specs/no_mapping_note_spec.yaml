@@ -1,0 +1,32 @@
+category: GENERIC_NO_MAPPING
+instruction: >
+  This is an airline fare's condition free text for a category that has
+  NO structured Excel field of its own -- confirmed against both the
+  real template and the user's DataMapping reference: no category-
+  specific column exists for this category at all. This extraction is
+  for an AUDIT/REFERENCE note only, never written to the Excel output --
+  only visible in the JSON output, for a human reviewer who wants to
+  know what this category's real text actually says.
+
+  Extract:
+  - Note: a one or two sentence plain-language summary of what the text
+    permits, restricts, or points to. If the text is itself just a
+    pointer/reference to an external document (e.g. a bare label with no
+    real condition), say so plainly rather than inventing content that
+    isn't there.
+
+  Leave Note null only if the text is genuinely empty or purely a
+  no-restriction phrase -- if this instruction is being shown to you at
+  all, the text has already been confirmed to be neither of those.
+few_shot_examples:
+  - condition_text: >
+      FOR U-/P-/L-/M-/H-/W-/Q-/N- FARE TYPE:-
+      CHNG FEE APPLY / REFUND FEE APPLY / NO SHOW FEE APPLY
+
+      FOR D-/R- FARE TYPE:-
+      CHNG FEE APPLY / NON REFUND / NO SHOW FEE APPLY
+    expected:
+      Note: >
+        Change/refund/no-show fees apply for U/P/L/M/H/W/Q/N fare types;
+        for D/R fare types, a change fee applies but the fare is
+        non-refundable, with a no-show fee also applying.

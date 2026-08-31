@@ -77,8 +77,45 @@ class CategoryResolver:
             # still expects one row per fare with just the common fields
             # filled in. An empty entries list produces zero rows; a
             # single blank entry produces the expected one row.
-            return self._bundle(rule_id, sheet_type, "NO_CATEGORY_MAPPING", [self._blank_entry()])
+            return self._resolve_no_mapping(rule_id, pricebook_data, sheet_type)
         return self._resolve_impl(rule_id, pricebook_data, sheet_type)
+
+    def _resolve_no_mapping(self, rule_id, pricebook_data, sheet_type):
+        """
+        Shared Type 1 fallback for every has_mapping=False category
+        (CAT13/18/20-23/26-29/31/33 -- confirmed via DataMapping that none
+        of these has ANY category-specific Excel column, so this can
+        never write into the actual filing regardless of what the text
+        says). Previously returned a blank entry unconditionally,
+        silently discarding whatever condition text existed -- confirmed
+        real content exists for at least CAT18 on every real sample, and
+        could exist for any of the others on a future file. Rather than
+        leave that as a silent gap, a JSON-only "Note" field captures it
+        for audit/reference (same pattern as CAT09's/CAT16's own Notes
+        extraction, but generic and shared here so no per-category yaml/
+        output_fields declaration is needed) -- never written to Excel,
+        only visible in the JSON output.
+
+        Gated the same way as every other NONE-phrase check in this
+        project (bug #30 and its follow-ups): only calls AI when the text
+        is genuinely neither empty nor the standard no-restriction
+        phrase, so this is a zero-cost no-op on every category whose real
+        text, on every sample checked so far, is exactly that phrase (11
+        of the 12 -- CAT18 is the one confirmed exception).
+        """
+        condition_text = ""
+        if hasattr(pricebook_data, "get_fare_rules_row"):
+            row = pricebook_data.get_fare_rules_row(self.category[3:])
+            condition_text = (row.get("FARE RULE CONDITIONS") or "").strip() if row else ""
+
+        if not condition_text or self._is_none_condition(condition_text):
+            return self._bundle(rule_id, sheet_type, "NO_CATEGORY_MAPPING",
+                                 [{"Note": None, "confidence": "HIGH", "flag_reason": None}])
+
+        spec_path = os.path.join(AI_SPECS_DIR, "no_mapping_note_spec.yaml")
+        fare_context = {"rule_id": rule_id, "category": self.category}
+        entry = extract_with_ai(condition_text, fare_context, spec_path, ["Note"])
+        return self._bundle(rule_id, sheet_type, "AI_EXTRACTED_NOTE_ONLY", [entry])
 
     def _resolve_type2_3(self, rule_id, pricebook_data, sheet_type):
         """
