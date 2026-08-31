@@ -56,7 +56,16 @@ class Cat10Resolver(CategoryResolver):
         # confidence to LOW since part of it is now AI-derived.
         side_trips_text = subrows.get(SUB_ROW_SIDE_TRIPS)
         notes_text = subrows.get(SUB_ROW_NOTES)
-        if side_trips_text or notes_text:
+        # BUGFIX: this used to be a plain truthy check (`if side_trips_text
+        # or notes_text:`) with no exclusion for the recognized "no
+        # restriction" phrase -- confirmed the same class of bug as CAT08
+        # (bug #30): a sub-row literally reading "NONE UNLESS OTHERWISE
+        # SPECIFIED" would still trigger a real AI call. _is_none_condition()
+        # excludes it per-field, so AI only fires when at least one sub-row
+        # has genuine content beyond that phrase.
+        side_trips_has_content = side_trips_text and not self._is_none_condition(side_trips_text)
+        notes_has_content = notes_text and not self._is_none_condition(notes_text)
+        if side_trips_has_content or notes_has_content:
             combined_text = (f"Side Trips: {side_trips_text or '(not specified)'}\n"
                               f"Notes: {notes_text or '(not specified)'}")
             spec_path = os.path.join(AI_SPECS_DIR, self.ai_spec_file)

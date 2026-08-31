@@ -58,7 +58,16 @@ class Cat15Resolver(CategoryResolver):
         # Ticketing Mode sub-row, extract via AI (per project decision:
         # this needs real interpretation, not simple keyword regex).
         ticketing_mode_text = subrows.get(SUB_ROW_TICKETING_MODE)
-        if main_condition or ticketing_mode_text:
+        # BUGFIX: this used to be a plain truthy check (`if main_condition
+        # or ticketing_mode_text:`) with no exclusion for the recognized
+        # "no restriction" phrase -- confirmed the same class of bug as
+        # CAT08 (bug #30): a main condition of literally "NONE UNLESS
+        # OTHERWISE SPECIFIED" would still trigger a real AI call.
+        # _is_none_condition() excludes it per-field, so AI only fires when
+        # at least one of the two has genuine content beyond that phrase.
+        main_condition_has_content = main_condition and not self._is_none_condition(main_condition)
+        ticketing_mode_has_content = ticketing_mode_text and not self._is_none_condition(ticketing_mode_text)
+        if main_condition_has_content or ticketing_mode_has_content:
             combined_text = (f"Main condition: {main_condition or '(none)'}\n"
                               f"Ticketing Mode: {ticketing_mode_text or '(none)'}")
             spec_path = os.path.join(AI_SPECS_DIR, self.ai_spec_file)
