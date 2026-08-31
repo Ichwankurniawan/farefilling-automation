@@ -235,7 +235,7 @@ class CategoryResolver:
         """True if the text is one of the known 'no restriction' phrasings."""
         return (condition_text or "").strip().upper() in NONE_PHRASES
 
-    def _ai_extract_entry(self, condition_text, rule_id, label_override=None):
+    def _ai_extract_entry(self, condition_text, rule_id, label_override=None, spec_file=None):
         """
         Calls the shared AI engine using this category's spec file, and
         this category's field labels read straight from the real template
@@ -250,8 +250,19 @@ class CategoryResolver:
         columns are literally headed "M","T","W","T","F","S","S" in the
         spreadsheet -- Tue/Thu both read "T", Sat/Sun both read "S" --
         so those get replaced with full day names before going to AI).
+
+        spec_file: optional override for which ai_specs/*.yaml file to
+        use -- defaults to self.ai_spec_file. Needed when a category's
+        Type 1 AI call and its Type 2/3 call need genuinely different
+        instructions/schemas but the class only has one ai_spec_file slot
+        (e.g. CAT16: self.ai_spec_file="cat16_spec.yaml" is the Type 2/3
+        embedded-IPRG AltGenRule extraction in
+        _resolve_type2_3_embedded_iprg(); Type 1's own Notes-sub-row
+        extraction needs a completely different instruction/schema, so it
+        passes spec_file="cat16_notes_spec.yaml" here instead of silently
+        reusing -- and overwriting the *meaning* of -- the same slot).
         """
-        spec_path = os.path.join(AI_SPECS_DIR, self.ai_spec_file)
+        spec_path = os.path.join(AI_SPECS_DIR, spec_file or self.ai_spec_file)
         fare_context = {"rule_id": rule_id, "category": self.category}
 
         field_labels = {}

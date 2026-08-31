@@ -229,6 +229,15 @@ CAT16_COLS = {
     "CAT_NUM": "Y",
     # Table NOT confirmed as "NEW" for this category (no example in the
     # template, unlike every other category) -- deliberately not defaulted.
+    # The 7 fields below are the only ones of the real 34 category-specific
+    # columns (Z-BD) with any grounding in real "Notes" sub-row text --
+    # confirmed directly against the template (row 201) and real HKF1/HKF2
+    # samples. See cat16_penalties.py's own comment for the rest of the
+    # deliberately-unmapped columns (Before/After Departure, Charge Type
+    # VOL/INVOL/Cancel, all 6 Waivers fields, Override Date, etc.).
+    "ChargeAmt1": "AE", "ChargeCur1": "AF", "AppliesPer": "AS",
+    "ChargeAppliesToReissue": "AO", "ChargeAppliesToRevalidation": "AP", "ChargeAppliesToRefund": "AN",
+    "NoteText": "AZ",
 }
 CAT16_START_ROW = 204
 

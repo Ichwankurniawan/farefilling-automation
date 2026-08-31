@@ -1,0 +1,46 @@
+category: CAT16
+instruction: >
+  This is an airline fare's Penalties condition free text, taken
+  SPECIFICALLY from the "Notes" sub-row of the Fare Rules sheet (never
+  from the other sub-row, "Voluntary Change/Refund/No show" -- that one
+  is confirmed, on every real sample seen so far, to be a bare pointer
+  to an external "FARE FAMILY FEE CONDITIONS" document this project has
+  no access to, not a real condition -- it must never be passed here).
+
+  Extract:
+  - ChargeAmt1: the numeric charge amount stated (e.g. 50 for "USD 50")
+  - ChargeCur1: the currency code (e.g. "USD")
+  - AppliesPer: what the charge is assessed per (e.g. "Ticket" if the
+    text says "PER TICKET")
+  - ChargeAppliesToReissue: "YES" if the text says the charge applies to
+    ticket reissuance, otherwise null
+  - ChargeAppliesToRevalidation: "YES" if the text says the charge
+    applies to ticket revalidation, otherwise null
+  - ChargeAppliesToRefund: "YES" if the text says the charge applies to
+    a refund, otherwise null
+  - NoteText: the condition text itself, lightly cleaned up (collapse
+    stray line breaks/extra spacing), not summarized or reworded
+
+  Leave any field the text doesn't address as null -- do not guess or
+  invent values. This mapping is based on real samples describing a
+  single flat per-ticket service fee; if the text describes something
+  structurally different (e.g. multiple charge tiers, a percentage
+  instead of a flat amount, a "no charge"/waived case), extract
+  conservatively and leave fields that don't clearly match as null
+  rather than forcing them into this shape.
+few_shot_examples:
+  - condition_text: >
+      A SERVICE FEE OF <USD 50> APPLIES PER TICKET REQUIRING ISSUANCE/
+      REISSUANCE /REVALIDATION/ REFUND THROUGH SQ TICKET OFFICE OR CALL
+      CENTRE.
+    expected:
+      ChargeAmt1: 50
+      ChargeCur1: "USD"
+      AppliesPer: "Ticket"
+      ChargeAppliesToReissue: "YES"
+      ChargeAppliesToRevalidation: "YES"
+      ChargeAppliesToRefund: "YES"
+      NoteText: >
+        A SERVICE FEE OF USD 50 APPLIES PER TICKET REQUIRING
+        ISSUANCE/REISSUANCE/REVALIDATION/REFUND THROUGH SQ TICKET OFFICE
+        OR CALL CENTRE.
