@@ -75,14 +75,80 @@ DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5"
 # more headroom, or less for a plain fast model where 4000 is overkill.
 DEFAULT_MAX_TOKENS = int(os.environ.get("AI_MAX_TOKENS", "4000"))
 
+# Identical (category, condition text) should always resolve to the same
+# extracted result -- without this, two RULEs in the same filing that
+# happen to share byte-identical condition text (e.g. HKF1/HKF2 both
+# reading "TICKETS MAY ONLY BE SOLD IN HONGKONG AND MACAU." for CAT15)
+# could get genuinely DIFFERENT answers, purely from the self-hosted
+# reasoning model's sampling randomness -- neither `temperature` nor
+# `seed` is pinned on the request (see `_call_openai_compatible()`).
+# Confirmed live, real end-to-end runs, not a hypothetical: the exact
+# same CAT15 text correctly extracted "Hong Kong"/"Macau" for HKF1 in one
+# run and for HKF2 in a different run, with the OTHER rule coming back
+# completely blank both times -- same input, inconsistent output,
+# depending purely on which call the model happened to handle well.
+# Keyed on everything that actually varies the prompt EXCEPT
+# fare_context/rule_id -- rule_id is shown to the model only as
+# informational context (which RULE this is), never something the
+# correct extraction should depend on, so two rules sharing the same
+# text are expected to share the same answer.
+# Deliberately process-lifetime, not reset per run: real usage is low
+# volume (see CLAUDE.md -- tens of WOs/month), so unbounded growth for
+# the life of one `uvicorn` process is a non-issue, and it also means
+# two SEPARATE filing runs that happen to share text (e.g. resubmitting
+# the same file, or another RULE using the same boilerplate clause) get
+# the same consistency benefit, not just RULEs within one run.
+_extraction_cache = {}
+
+
+def _cache_key(spec_path, condition_text, output_fields, field_labels):
+    return (
+        spec_path,
+        condition_text,
+        tuple(output_fields),
+        tuple(sorted((field_labels or {}).items())),
+    )
+
+
+def _normalize_condition_text(text):
+    """
+    Collapses whitespace-only formatting noise -- extra spaces, embedded
+    line breaks, trailing whitespace -- that doesn't represent a real
+    difference in what the condition text says. Confirmed real case:
+    HKF1/HKF2's CAT16 "Notes" text is the exact same business content
+    (identical service-fee sentence), typed with a stray line break in
+    one file and not the other ("REVALIDATION/   \\nREFUND" vs
+    "REVALIDATION/ REFUND") -- which, before this normalization, meant
+    the two rules didn't share a cache entry and each needed its own
+    real AI call even though nothing meaningful actually differed.
+    Applied before both the cache key AND the prompt itself, so the
+    model is never shown the stray formatting either.
+    """
+    if not isinstance(text, str):
+        return text
+    return " ".join(text.split())
+
 
 def extract_with_ai(condition_text, fare_context, spec_path, output_fields, field_labels=None):
-    spec = _load_spec(spec_path)
-    prompt = _build_prompt(condition_text, fare_context, spec, output_fields, field_labels or {})
-
+    condition_text = _normalize_condition_text(condition_text)
     category = fare_context.get("category", "?")
     rule_id = fare_context.get("rule_id", "?")
     provider = os.environ.get("AI_PROVIDER", "anthropic")
+
+    cache_key = _cache_key(spec_path, condition_text, output_fields, field_labels)
+    cached = _extraction_cache.get(cache_key)
+    if cached is not None:
+        usage = cached["usage"]
+        run_logger.record_ai_call(
+            category, rule_id, provider, cached["model"], 0.0, "cached",
+            prompt_tokens=usage.get("prompt_tokens"), completion_tokens=usage.get("completion_tokens"),
+            total_tokens=usage.get("total_tokens"),
+            detail="identical condition text already resolved earlier -- reused, no new call",
+        )
+        return dict(cached["result"])  # copy -- some callers mutate the returned dict
+
+    spec = _load_spec(spec_path)
+    prompt = _build_prompt(condition_text, fare_context, spec, output_fields, field_labels or {})
 
     if provider == "openai_compatible":
         base_url = os.environ.get("AI_BASE_URL")
@@ -129,6 +195,7 @@ def extract_with_ai(condition_text, fare_context, spec_path, output_fields, fiel
         # to recompute this against what it actually keeps -- see
         # categories/base.py's _copy_ai_fields().
         parsed["ai_fields"] = {f for f in output_fields if parsed.get(f) is not None}
+        _extraction_cache[cache_key] = {"result": dict(parsed), "model": model, "usage": usage}
         return parsed
     except Exception as e:
         return _mock_response(output_fields, reason=f"Response parsing failed ({e}) -- fell back to blank, flagged")
