@@ -3,7 +3,7 @@
 **Audience:** Ops/Infra team deploying the Fare Filing Automation web app.
 **Scope:** Internal-only tool, no authentication in this version, single host.
 **Target host:** The Linux server already running the self-hosted AI model
-(currently reachable at `10.90.10.20:8081`). Deploying alongside it means
+(address provided separately by the project owner). Deploying alongside it means
 the app can call the AI endpoint over `localhost` instead of the network.
 
 If a different host is used instead, everything below still applies —
@@ -68,14 +68,13 @@ as local, gitignored-style config, never committed). Create it fresh at
 
 ```
 AI_PROVIDER=openai_compatible
-AI_BASE_URL=http://localhost:8081/v1
-AI_MODEL=qwen3.6:35b-a3b-uncensored
+AI_BASE_URL=<AI_ENDPOINT_URL>
+AI_MODEL=<MODEL_NAME>
 AI_MAX_TOKENS=4000
 ```
 
 Adjust `AI_BASE_URL` if the AI model isn't on `localhost` for this
-deployment. `AI_API_KEY` is optional and can be omitted — the self-hosted
-endpoint doesn't require one.
+deployment. Actual values are provided separately, never committed.
 
 ## 5. Python environment
 
