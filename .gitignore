@@ -42,3 +42,6 @@ reports/*.pptx
 # OS/editor cruft
 .DS_Store
 Thumbs.db
+
+# Local Claude Code project context -- not part of the repo
+CLAUDE.md
